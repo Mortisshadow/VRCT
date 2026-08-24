@@ -7,6 +7,10 @@ from tqdm import tqdm # tqdmをインポート
 def zip_files_and_directory(zip_name, file_paths, dir_paths, verbose=False):
     zip_file_path = Path(zip_name)
     # ZIPファイルを作成
+    missing = [path for path in file_paths if not Path(path).is_file()]
+    missing.extend(path for path in dir_paths if not Path(path).is_dir())
+    if missing:
+        raise FileNotFoundError(f"Required release inputs are missing: {', '.join(missing)}")
     try:
         with zipfile.ZipFile(zip_file_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             # ファイルを追加
@@ -16,8 +20,6 @@ def zip_files_and_directory(zip_name, file_paths, dir_paths, verbose=False):
                     zipf.write(file_path, file_path.name)
                     if verbose:
                         print(f"Add file: {file_path}")
-                else:
-                    print(f"Warning: File not found or is not a file: {file_path}")
 
             # ディレクトリを追加
             for dir_path_str in dir_paths:
@@ -30,13 +32,11 @@ def zip_files_and_directory(zip_name, file_paths, dir_paths, verbose=False):
                         zipf.write(item, arcname)
                         if verbose:
                             print(f"Add file: {item}")
-                else:
-                    print(f"Warning: Directory not found or is not a directory: {dir_path}")
         print(f"Successfully created zip file: {zip_file_path}")
     except IOError as e:
-        print(f"Error: Could not create zip file {zip_file_path}. Reason: {e}")
+        raise RuntimeError(f"Could not create zip file {zip_file_path}. Reason: {e}") from e
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        raise
 
 
 if __name__ == "__main__":

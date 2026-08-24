@@ -9,7 +9,7 @@ from os import path as os_path
 import struct
 import subprocess
 import sys
-from threading import Condition, Lock, Thread
+from threading import Condition, Event, Lock, Thread, current_thread
 from time import monotonic
 from typing import Callable, Dict, Optional, Tuple
 
@@ -124,22 +124,41 @@ class WhisperCppVulkanBackend(TranscriptionBackend):
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             bufsize=0, creationflags=flags,
         )
-        ready = self._process.stdout.readline().decode("utf-8", errors="replace").rstrip("\r\n").split("\t", 3)
+        self._io_lock = Lock()
+        self._closed = False
+        # Drain diagnostics during model initialization as ggml can emit enough
+        # device/model detail to fill a Windows pipe before the ready marker.
+        self._stderr_thread = Thread(target=self._drain_stderr, daemon=True, name="WhisperCppDiagnostics")
+        self._stderr_thread.start()
+        ready_line = {}
+        ready_event = Event()
+        def read_ready() -> None:
+            try:
+                ready_line["data"] = self._process.stdout.readline()
+            except Exception as exc:
+                ready_line["error"] = exc
+            finally:
+                ready_event.set()
+        Thread(target=read_ready, daemon=True, name="WhisperCppStartup").start()
+        if not ready_event.wait(_READY_TIMEOUT_SECONDS):
+            self.close(graceful=False)
+            raise TimeoutError("whisper.cpp worker model loading timed out")
+        if "error" in ready_line:
+            self.close(graceful=False)
+            raise RuntimeError(f"whisper.cpp worker startup failed: {ready_line['error']}")
+        ready = ready_line.get("data", b"").decode("utf-8", errors="replace").rstrip("\r\n").split("\t", 3)
         if len(ready) != 4 or ready[0] != "VRCT_READY":
-            error = self._process.stderr.readline().decode("utf-8", errors="replace").strip()
-            self.close()
-            raise RuntimeError(error or "invalid whisper.cpp worker startup response")
+            self.close(graceful=False)
+            raise RuntimeError("invalid whisper.cpp worker startup response")
         self.gpu_active = ready[1] == "1"
         self.backend_name = WHISPER_CPP_VULKAN_BACKEND
         self.device = ready[2].replace("\\t", "\t").replace("\\n", "\n")
         self.load_duration_ms = float(ready[3])
-        self._io_lock = Lock()
-        Thread(target=self._drain_stderr, daemon=True, name="WhisperCppDiagnostics").start()
         logger.info("Whisper backend=%s device=%s model=%s load_ms=%.1f gpu_active=%s",
                     WHISPER_CPP_VULKAN_BACKEND, self.device, model,
                     self.load_duration_ms or (monotonic() - started) * 1000, self.gpu_active)
         if not self.gpu_active:
-            self.close()
+            self.close(graceful=False)
             raise RuntimeError("whisper.cpp started without an active Vulkan GPU backend")
 
     def _drain_stderr(self) -> None:
@@ -160,7 +179,9 @@ class WhisperCppVulkanBackend(TranscriptionBackend):
                 with self._io_lock:
                     if self._process.poll() is not None:
                         raise RuntimeError("whisper.cpp worker exited unexpectedly")
-                    self._process.stdin.write(header + language_bytes + samples)
+                    self._process.stdin.write(header)
+                    self._process.stdin.write(language_bytes)
+                    self._process.stdin.write(samples)
                     self._process.stdin.flush()
                     values = _RESPONSE.unpack(_read_exact(self._process.stdout, _RESPONSE.size))
                     magic, status, confidence, duration_ms, lang_len, text_len, error_len = values
@@ -176,7 +197,8 @@ class WhisperCppVulkanBackend(TranscriptionBackend):
         thread.start()
         thread.join(_TRANSCRIBE_TIMEOUT_SECONDS)
         if thread.is_alive():
-            self._process.kill()
+            self.close(graceful=False)
+            thread.join(timeout=1)
             raise TimeoutError("whisper.cpp transcription timed out")
         if "error" in exchange_result:
             raise exchange_result["error"]
@@ -186,22 +208,45 @@ class WhisperCppVulkanBackend(TranscriptionBackend):
         logger.info("Whisper transcription backend=%s duration_ms=%.1f", WHISPER_CPP_VULKAN_BACKEND, duration_ms)
         return BackendResult(text, detected or None, confidence, duration_ms)
 
-    def close(self) -> None:
+    def close(self, graceful: bool = True) -> None:
         process = getattr(self, "_process", None)
-        if process is None or process.poll() is not None:
+        if process is None or getattr(self, "_closed", False):
             return
+        self._closed = True
         try:
-            process.stdin.write(_REQUEST.pack(_MAGIC, 1, 2, 0, 0, 0.0, 0.0, 0))
-            process.stdin.flush()
-            process.wait(timeout=5)
+            with self._io_lock:
+                if graceful and process.poll() is None:
+                    process.stdin.write(_REQUEST.pack(_MAGIC, 1, 2, 0, 0, 0.0, 0.0, 0))
+                    process.stdin.flush()
+            if process.poll() is None:
+                process.wait(timeout=5 if graceful else 0.1)
         except Exception:
-            process.kill()
+            if process.poll() is None:
+                process.kill()
+            try:
+                process.wait(timeout=5)
+            except Exception:
+                pass
+        finally:
+            for stream_name in ("stdin", "stdout", "stderr"):
+                stream = getattr(process, stream_name, None)
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+            stderr_thread = getattr(self, "_stderr_thread", None)
+            if stderr_thread is not None and stderr_thread is not current_thread():
+                stderr_thread.join(timeout=1)
+            logger.info("Whisper backend=%s state=closed", WHISPER_CPP_VULKAN_BACKEND)
 
 
 class _SharedBackend:
     def __init__(self, key: Tuple, factory: Callable[[], TranscriptionBackend]) -> None:
         self.key = key
         self.refs = 1
+        self.active_calls = 0
+        self.closing = False
         self.backend: Optional[TranscriptionBackend] = None
         self.condition = Condition()
         self.status = BackendStatus(backend=key[0], state="loading", model=key[2])
@@ -238,10 +283,18 @@ class _SharedBackend:
                 self.condition.wait_for(lambda: self.status.state != "loading", timeout=_READY_TIMEOUT_SECONDS)
             if self.backend is None:
                 raise RuntimeError(self.status.error or "Whisper model loading timed out")
+            if self.closing:
+                raise RuntimeError("Whisper backend is closing")
             backend = self.backend
-        result = backend.transcribe(*args, **kwargs)
-        self.status.transcription_duration_ms = result.duration_ms
-        return result
+            self.active_calls += 1
+        try:
+            result = backend.transcribe(*args, **kwargs)
+            self.status.transcription_duration_ms = result.duration_ms
+            return result
+        finally:
+            with self.condition:
+                self.active_calls -= 1
+                self.condition.notify_all()
 
 
 _registry: Dict[Tuple, _SharedBackend] = {}
@@ -280,7 +333,10 @@ def releaseBackend(shared: Optional[_SharedBackend]) -> None:
             return
         _registry.pop(shared.key, None)
     with shared.condition:
+        shared.closing = True
+        shared.condition.wait_for(lambda: shared.active_calls == 0)
         backend = shared.backend
+        shared.status.state = "closed"
     if backend is not None:
         backend.close()
 

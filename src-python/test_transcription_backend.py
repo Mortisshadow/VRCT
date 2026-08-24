@@ -1,6 +1,7 @@
 import io
 import struct
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -66,6 +67,16 @@ class FakeProcess:
     def kill(self): self._poll = -9
 
 
+class BlockingStartupProcess(FakeProcess):
+    class BlockingOutput(io.BytesIO):
+        def readline(self, *args, **kwargs):
+            threading.Event().wait(1)
+            return b""
+    def __init__(self):
+        super().__init__(b"")
+        self.stdout = self.BlockingOutput()
+
+
 class TestVulkanFraming(unittest.TestCase):
     def test_request_response_framing(self):
         lang, text = b"en", b"hello"
@@ -79,6 +90,16 @@ class TestVulkanFraming(unittest.TestCase):
         self.assertEqual(result.text, "hello")
         proc.stdin.seek(0); header = proc.stdin.read(_RESPONSE.size if False else struct.calcsize("<IIIIIffi"))
         self.assertEqual(struct.unpack("<IIIIIffi", header)[0], _MAGIC)
+
+    def test_startup_timeout_kills_and_reaps_worker(self):
+        proc = BlockingStartupProcess()
+        with patch("models.transcription.transcription_backend.getWhisperCppWorkerPath", return_value="worker"), \
+             patch("models.transcription.transcription_backend.getWhisperCppModelPath", return_value="model"), \
+             patch("models.transcription.transcription_backend.os_path.isfile", return_value=True), \
+             patch("models.transcription.transcription_backend._READY_TIMEOUT_SECONDS", .01):
+            with self.assertRaisesRegex(TimeoutError, "model loading timed out"):
+                WhisperCppVulkanBackend(".", "m", process_factory=lambda *a, **k: proc)
+        self.assertIsNotNone(proc.poll())
 
 
 if __name__ == "__main__": unittest.main()

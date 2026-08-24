@@ -966,6 +966,7 @@ class Controller:
         config.SELECTED_TRANSCRIPTION_COMPUTE_DEVICE = device
         config.SELECTED_TRANSCRIPTION_COMPUTE_TYPE = "auto"
         self.run(200, self.run_mapping["selected_transcription_compute_type"], config.SELECTED_TRANSCRIPTION_COMPUTE_TYPE)
+        model.reloadTranscriptionSessions()
         return {"status":200,"result":config.SELECTED_TRANSCRIPTION_COMPUTE_DEVICE}
 
     @staticmethod
@@ -2739,9 +2740,9 @@ class Controller:
     def getSelectedTranscriptionComputeType(*args, **kwargs) -> dict:
         return {"status":200, "result":config.SELECTED_TRANSCRIPTION_COMPUTE_TYPE}
 
-    @staticmethod
-    def setSelectedTranscriptionComputeType(data, *args, **kwargs) -> dict:
+    def setSelectedTranscriptionComputeType(self, data, *args, **kwargs) -> dict:
         config.SELECTED_TRANSCRIPTION_COMPUTE_TYPE = str(data)
+        model.reloadTranscriptionSessions()
         return {"status":200, "result":config.SELECTED_TRANSCRIPTION_COMPUTE_TYPE}
 
     @staticmethod

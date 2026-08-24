@@ -13,7 +13,7 @@ partial (発話中の暫定結果) 通知は行わない。
 import time
 from io import BytesIO
 from queue import Empty
-from threading import Event
+from threading import Event, Lock
 import wave
 from typing import Any, Dict, List, Optional
 from speech_recognition import Recognizer, AudioData, AudioFile
@@ -81,12 +81,13 @@ class AudioTranscriber:
         self.transcription_engine = "Google"
         self.whisper_model = None
         self.whisper_backend = None
+        self._close_lock = Lock()
         self.whisper_weight_type = whisper_weight_type
         self.audio_sources: Dict[str, Any] = {
             "sample_rate": source.SAMPLE_RATE,
             "sample_width": source.SAMPLE_WIDTH,
             "channels": source.channels,
-            "last_sample": bytes(),
+            "last_sample": bytearray(),
             "last_spoken": None,
             "new_phrase": True,
             "process_data_func": self.processSpeakerData if speaker else self.processMicData,
@@ -149,16 +150,19 @@ class AudioTranscriber:
                 case "Whisper":
                     audio_data = np.frombuffer(
                         audio_data.get_raw_data(convert_rate=16000, convert_width=2), np.int16
-                    ).flatten().astype(np.float32) / 32768.0
+                    ).astype(np.float32)
+                    audio_data *= (1.0 / 32768.0)
                     if torch is not None and isinstance(audio_data, torch.Tensor):
                         audio_data = audio_data.detach().numpy()
 
-                    for language, country in zip(languages, countries):
-                        source_language = (
-                            transcription_lang[language][country][self.transcription_engine]
-                            if len(languages) == 1
-                            else None
-                        )
+                    # Auto language detection is part of the same decode. Repeating the
+                    # identical auto request once per configured language multiplies GPU
+                    # work without changing the hypothesis or confidence.
+                    language_country_pairs = list(zip(languages, countries))
+                    if language_country_pairs:
+                        language, country = language_country_pairs[0]
+                        source_language = transcription_lang[language][country][self.transcription_engine] \
+                            if len(language_country_pairs) == 1 else None
                         if self.whisper_backend is not None:
                             backend_result = self.whisper_backend.transcribe(
                                 audio_data, language=source_language, avg_logprob=avg_logprob,
@@ -182,11 +186,13 @@ class AudioTranscriber:
                                     text += segment.text
                             detected_language = info.language
                             confidence = info.language_probability
-                        confidences.append({"confidence": confidence, "text": text, "language": language})
-                        if (len(languages) == 1) or (
-                            transcription_lang[language][country][self.transcription_engine] == detected_language
-                        ):
-                            break
+                        selected_language = next(
+                            (candidate_language for candidate_language, candidate_country in language_country_pairs
+                             if transcription_lang[candidate_language][candidate_country][self.transcription_engine]
+                             == detected_language),
+                            language,
+                        )
+                        confidences.append({"confidence": confidence, "text": text, "language": selected_language})
 
         except UnknownValueError:
             pass
@@ -202,17 +208,17 @@ class AudioTranscriber:
     def updateLastSampleAndPhraseStatus(self, data: bytes, time_spoken) -> None:
         source_info = self.audio_sources
         if source_info["last_spoken"] and time_spoken - source_info["last_spoken"] > timedelta(seconds=self.phrase_timeout):
-            source_info["last_sample"] = bytes()
+            source_info["last_sample"] = bytearray()
             source_info["new_phrase"] = True
         else:
             source_info["new_phrase"] = False
 
-        source_info["last_sample"] += data
+        source_info["last_sample"].extend(data)
         source_info["last_spoken"] = time_spoken
 
     def processMicData(self) -> AudioData:
         audio_data = AudioData(
-            self.audio_sources["last_sample"], self.audio_sources["sample_rate"], self.audio_sources["sample_width"]
+            bytes(self.audio_sources["last_sample"]), self.audio_sources["sample_rate"], self.audio_sources["sample_width"]
         )
         return audio_data
 
@@ -222,7 +228,7 @@ class AudioTranscriber:
             wf.setnchannels(self.audio_sources["channels"])
             wf.setsampwidth(get_sample_size(paInt16))
             wf.setframerate(self.audio_sources["sample_rate"])
-            wf.writeframes(self.audio_sources["last_sample"])
+            wf.writeframes(bytes(self.audio_sources["last_sample"]))
         temp_file.seek(0)
 
         if self.audio_sources["channels"] > 2:
@@ -241,7 +247,7 @@ class AudioTranscriber:
         transcript = self.transcript_data
 
         if source_info["new_phrase"] or len(transcript) == 0:
-            if len(transcript) > self.max_phrases:
+            if self.max_phrases > 0 and len(transcript) >= self.max_phrases:
                 transcript.pop(-1)
             transcript.insert(0, result)
         else:
@@ -256,9 +262,12 @@ class AudioTranscriber:
 
     def clearTranscriptData(self) -> None:
         self.transcript_data.clear()
-        self.audio_sources["last_sample"] = bytes()
+        self.audio_sources["last_sample"] = bytearray()
         self.audio_sources["new_phrase"] = True
 
     def close(self) -> None:
-        releaseBackend(self.whisper_backend)
-        self.whisper_backend = None
+        with self._close_lock:
+            # Detach first so session-stop and worker end callbacks can safely race.
+            backend = self.whisper_backend
+            self.whisper_backend = None
+        releaseBackend(backend)

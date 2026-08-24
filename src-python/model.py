@@ -1241,12 +1241,16 @@ class Model:
         self._speaker_session.reconfigure(transcript=False)
 
     def reloadTranscriptionSessions(self) -> None:
-        """Apply a backend/model change and release the old shared model."""
+        """Apply a backend/model change without overlapping old/new models."""
         self.ensure_initialized()
-        for session in (self._mic_session, self._speaker_session):
-            if "transcript" in session.features:
-                session.reconfigure(transcript=False)
-                session.reconfigure(transcript=True)
+        active = [session for session in (self._mic_session, self._speaker_session)
+                  if "transcript" in session.features]
+        # Stop every consumer first so the shared backend refcount reaches zero
+        # and releases its model/worker before a replacement starts loading.
+        for session in active:
+            session.reconfigure(transcript=False)
+        for session in active:
+            session.reconfigure(transcript=True)
 
     def startCheckSpeakerEnergy(self, fnc:Optional[Callable[[float], None]]=None) -> None:
         self.ensure_initialized()

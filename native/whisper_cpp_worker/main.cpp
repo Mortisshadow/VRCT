@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -29,11 +30,17 @@ std::string escaped(std::string s) { for (char &c : s) if (c == '\t' || c == '\r
 }
 
 int main(int argc, char **argv) {
-    std::string model; int threads = 4; int device = 0;
+    std::string model; int threads = 4; int device = 0; bool probe = false;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
         else if (!std::strcmp(argv[i], "--threads") && i + 1 < argc) threads = std::max(1, std::atoi(argv[++i]));
         else if (!std::strcmp(argv[i], "--device") && i + 1 < argc) device = std::max(0, std::atoi(argv[++i]));
+        else if (!std::strcmp(argv[i], "--probe")) probe = true;
+    }
+    if (probe) {
+        const char *raw = whisper_print_system_info();
+        std::cout << "VRCT_PROBE\t" << escaped(raw ? raw : "unknown") << "\n";
+        return 0;
     }
     if (model.empty()) { std::cerr << "--model is required\n"; return 2; }
     const auto load_started = std::chrono::steady_clock::now();
@@ -41,22 +48,29 @@ int main(int argc, char **argv) {
     whisper_context *ctx = whisper_init_from_file_with_params(model.c_str(), lp);
     if (!ctx) { std::cerr << "failed to load whisper model\n"; return 3; }
     const char *raw_system_info = whisper_print_system_info();
-    const std::string system_info = escaped(raw_system_info ? raw_system_info : "whisper.cpp Vulkan");
+    const std::string system_info = "Vulkan device index " + std::to_string(device) + "; " +
+        escaped(raw_system_info ? raw_system_info : "whisper.cpp Vulkan");
     const bool gpu_active = lp.use_gpu && system_info.find("VULKAN = 1") != std::string::npos;
     const double load_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - load_started).count();
     std::cerr << "whisper.cpp backend initialized; gpu_active=" << gpu_active
               << " threads=" << threads << " device=" << system_info << " load_ms=" << load_ms << "\n";
     std::cout << "VRCT_READY\t" << (gpu_active ? 1 : 0) << "\t" << system_info << "\t" << load_ms << "\n" << std::flush;
+    std::vector<float> pcm;
     for (;;) {
         uint32_t magic, version, command, lang_len, samples; float avg_logprob, no_speech; int32_t ngram;
         if (!read_one(magic) || !read_one(version) || !read_one(command) || !read_one(lang_len) || !read_one(samples) ||
             !read_one(avg_logprob) || !read_one(no_speech) || !read_one(ngram)) break;
         std::string language; if (!read_bytes(language, lang_len)) break;
-        std::vector<float> pcm(samples); if (samples && !std::cin.read(reinterpret_cast<char *>(pcm.data()), samples * sizeof(float))) break;
+        pcm.resize(samples); if (samples && !std::cin.read(reinterpret_cast<char *>(pcm.data()), samples * sizeof(float))) break;
         if (magic != MAGIC || version != VERSION) { response(-2, 0, 0, "", "", "invalid request header"); continue; }
         if (command == 2) break;
         if (command != 1) { response(-3, 0, 0, "", "", "unknown command"); continue; }
+        const bool silent = std::none_of(pcm.begin(), pcm.end(), [](float sample) { return std::fabs(sample) > 1.0e-6f; });
+        if (pcm.size() < 1600 || silent) {
+            response(0, 0, 0, language, "", "");
+            continue;
+        }
         auto started = std::chrono::steady_clock::now();
         auto params = whisper_full_default_params(WHISPER_SAMPLING_BEAM_SEARCH);
         params.n_threads = threads; params.no_timestamps = true; params.temperature = 0.0f;

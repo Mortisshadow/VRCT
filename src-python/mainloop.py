@@ -8,8 +8,35 @@ from typing import Any, Tuple
 from threading import Thread, Event, Lock
 from queue import Queue, Empty
 import logging
-from controller import Controller  # noqa: E402
 from utils import printLog, printResponse, errorLogging, encodeBase64 # noqa: E402
+
+
+def _runPackageSmokeTest() -> int:
+    """Validate native resources through the same paths used when frozen."""
+    import subprocess
+    from models.transcription.transcription_backend import getWhisperCppWorkerPath
+
+    root = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(__file__)
+    worker = getWhisperCppWorkerPath(root)
+    if not os.path.isfile(worker):
+        print(f"VRCT_PACKAGE_SMOKE_ERROR worker missing: {worker}", file=sys.stderr)
+        return 2
+    completed = subprocess.run(
+        [worker, "--probe"], capture_output=True, text=True, timeout=30,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if completed.returncode != 0 or "VRCT_PROBE" not in completed.stdout:
+        print(f"VRCT_PACKAGE_SMOKE_ERROR worker probe failed: {completed.stderr}", file=sys.stderr)
+        return 3
+    print(f"VRCT_PACKAGE_SMOKE_OK worker={worker} {completed.stdout.strip()}")
+    return 0
+
+
+if "--package-smoke" in sys.argv:
+    raise SystemExit(_runPackageSmokeTest())
+
+
+from controller import Controller  # noqa: E402
 
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 

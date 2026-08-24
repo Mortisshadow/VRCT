@@ -38,6 +38,23 @@ class TestWhisperAudioConversion(unittest.TestCase):
         from models.transcription.transcription_backend import releaseBackend
         releaseBackend(shared); _registry.clear()
 
+    @patch("models.transcription.transcription_transcriber.checkWhisperWeight", return_value=True)
+    def test_multiple_languages_use_one_auto_detection_pass(self, _):
+        calls = []
+        class Backend:
+            def transcribe(self, audio, **kwargs):
+                calls.append(kwargs)
+                return BackendResult("hello", "en", .9)
+            def close(self): pass
+        transcriber = AudioTranscriber(False, FakeAudioSource(), 3, 10, "Whisper",
+                                       root=".", whisper_weight_type="multi-language",
+                                       backend_factory=lambda: Backend())
+        q = Queue(); q.put((np.array([1, 2], dtype="<i2").tobytes(), datetime.now()))
+        transcriber.transcribeAudioQueue(q, ["Japanese", "English"], ["Japan", "United States"])
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["language"])
+        transcriber.close(); _registry.clear()
+
 
 class TestAudioProcessingSelection(unittest.TestCase):
     @patch("models.transcription.transcription_transcriber.checkWhisperWeight", return_value=False)
