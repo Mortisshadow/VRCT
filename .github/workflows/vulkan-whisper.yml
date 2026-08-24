@@ -65,8 +65,10 @@ jobs:
         run: |
           & native\whisper_cpp_worker\stage\whisper_cpp\vrct-whisper-worker.exe --probe
           if ($LASTEXITCODE -ne 0) { throw 'Native worker probe failed' }
-          $dumpbin = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\2022' -Recurse -Filter dumpbin.exe |
-            Select-Object -First 1 -ExpandProperty FullName
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = if (Test-Path $vswhere) {
+            & $vswhere -latest -products * -find **\Hostx64\x64\dumpbin.exe | Select-Object -First 1
+          }
           if ($dumpbin) {
             & $dumpbin /DEPENDENTS native\whisper_cpp_worker\stage\whisper_cpp\vrct-whisper-worker.exe
           } else {
@@ -82,7 +84,15 @@ jobs:
           .venv\Scripts\python.exe -m unittest discover -s src-python -p "test_transcription*.py" -v
           .venv\Scripts\python.exe -m unittest discover -s src-python -p "test_model*.py" -v
       - name: Build final CPU/Vulkan application package
-        run: npm run release
+        shell: pwsh
+        run: |
+          npm run task-kill
+          npm run clean-soft
+          npm run update-version
+          npm run build-python
+          npm run vite-build
+          npm run tauri build
+          python utils\zip.py --zip_name VRCT.zip
       - name: Smoke test frozen application and final release layout
         shell: pwsh
         run: |
