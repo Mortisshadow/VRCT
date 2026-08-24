@@ -19,6 +19,9 @@ class _FakeAudioTranscriber:
     def __init__(self, *args, **kwargs) -> None:
         pass
 
+    def close(self) -> None:
+        pass
+
 
 class _FakeAudioRecorder:
     """model.py の isinstance() チェックを通しつつ recordIntoQueue 等を no-op 化。"""
