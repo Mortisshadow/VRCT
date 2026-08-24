@@ -58,6 +58,12 @@ class TestBackendLifecycle(unittest.TestCase):
         self.assertEqual(shared.status.state, "ready")
         self.assertIs(shared.backend, faster.return_value)
 
+    def test_backend_controller_endpoints_are_registered(self):
+        source = (__import__("pathlib").Path(__file__).with_name("mainloop.py")).read_text(encoding="utf-8")
+        self.assertIn('"/get/data/whisper_backends"', source)
+        self.assertIn('"/get/data/selected_whisper_backend"', source)
+        self.assertIn('"/set/data/selected_whisper_backend"', source)
+
 
 class FakeProcess:
     def __init__(self, output):

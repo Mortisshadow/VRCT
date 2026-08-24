@@ -412,6 +412,11 @@ mapping = {
 
     "/get/data/selectable_whisper_weight_type_dict": {"status": True, "variable":controller.getSelectableWhisperWeightTypeDict},
 
+    "/get/data/whisper_backends": {"status": True, "variable":controller.getWhisperBackends},
+    "/get/data/selected_whisper_backend": {"status": True, "variable":controller.getSelectedWhisperBackend},
+    "/set/data/selected_whisper_backend": {"status": True, "variable":controller.setSelectedWhisperBackend},
+    "/get/data/whisper_backend_status": {"status": True, "variable":controller.getWhisperBackendStatus},
+
     "/get/data/selected_whisper_weight_type": {"status": True, "variable":controller.getWhisperWeightType},
     "/set/data/selected_whisper_weight_type": {"status": True, "variable":controller.setWhisperWeightType},
 
