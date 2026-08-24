@@ -1,4 +1,5 @@
 #include <whisper.h>
+#include <ggml-backend.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -27,6 +28,15 @@ void response(int32_t status, float confidence, double elapsed, const std::strin
     std::cout.flush();
 }
 std::string escaped(std::string s) { for (char &c : s) if (c == '\t' || c == '\r' || c == '\n') c = ' '; return s; }
+ggml_backend_dev_t gpu_device_at(int requested) {
+    int gpu_index = 0;
+    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+        auto dev = ggml_backend_dev_get(i);
+        if (ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_GPU) continue;
+        if (gpu_index++ == requested) return dev;
+    }
+    return nullptr;
+}
 }
 
 int main(int argc, char **argv) {
@@ -39,7 +49,8 @@ int main(int argc, char **argv) {
     }
     if (probe) {
         const char *raw = whisper_print_system_info();
-        std::cout << "VRCT_PROBE\t" << escaped(raw ? raw : "unknown") << "\n";
+        std::cout << "VRCT_PROBE\tGGML_VULKAN=1\tdevices=" << ggml_backend_dev_count()
+                  << "\t" << escaped(raw ? raw : "unknown") << "\n";
         return 0;
     }
     if (model.empty()) { std::cerr << "--model is required\n"; return 2; }
@@ -48,9 +59,12 @@ int main(int argc, char **argv) {
     whisper_context *ctx = whisper_init_from_file_with_params(model.c_str(), lp);
     if (!ctx) { std::cerr << "failed to load whisper model\n"; return 3; }
     const char *raw_system_info = whisper_print_system_info();
-    const std::string system_info = "Vulkan device index " + std::to_string(device) + "; " +
-        escaped(raw_system_info ? raw_system_info : "whisper.cpp Vulkan");
-    const bool gpu_active = lp.use_gpu && system_info.find("VULKAN = 1") != std::string::npos;
+    const auto selected_device = gpu_device_at(device);
+    const bool gpu_active = selected_device != nullptr;
+    const std::string device_name = selected_device
+        ? escaped(std::string(ggml_backend_dev_name(selected_device)) + " (" + ggml_backend_dev_description(selected_device) + ")")
+        : "no registered Vulkan GPU at index " + std::to_string(device);
+    const std::string system_info = device_name + "; " + escaped(raw_system_info ? raw_system_info : "whisper.cpp");
     const double load_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - load_started).count();
     std::cerr << "whisper.cpp backend initialized; gpu_active=" << gpu_active

@@ -51,7 +51,13 @@ jobs:
         run: |
           & native\whisper_cpp_worker\stage\whisper_cpp\vrct-whisper-worker.exe --probe
           if ($LASTEXITCODE -ne 0) { throw 'Native worker probe failed' }
-          dumpbin /DEPENDENTS native\whisper_cpp_worker\stage\whisper_cpp\vrct-whisper-worker.exe
+          $dumpbin = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\2022' -Recurse -Filter dumpbin.exe |
+            Select-Object -First 1 -ExpandProperty FullName
+          if ($dumpbin) {
+            & $dumpbin /DEPENDENTS native\whisper_cpp_worker\stage\whisper_cpp\vrct-whisper-worker.exe
+          } else {
+            Write-Warning 'dumpbin was unavailable; native startup probe still passed'
+          }
       - name: Install Python dependencies
         shell: cmd
         run: bat\install.bat
