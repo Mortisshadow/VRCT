@@ -8,12 +8,14 @@ import os
 # VRCT_PYINSTALLER_UPX=1.
 _use_upx = os.environ.get("VRCT_PYINSTALLER_UPX") == "1"
 
-_worker_dir = os.path.abspath('./../native/whisper_cpp_worker/stage/whisper_cpp')
+_worker_dir = os.path.abspath(os.path.join(SPECPATH, '..', 'native', 'whisper_cpp_worker', 'stage', 'whisper_cpp'))
 _worker_bins = []
 if os.path.isdir(_worker_dir):
     _worker_bins = [(os.path.join(_worker_dir, f), 'whisper_cpp')
                     for f in os.listdir(_worker_dir)
                     if f.lower().endswith(('.exe', '.dll'))]
+if not any(os.path.basename(src).lower() == 'vrct-whisper-worker.exe' for src, _ in _worker_bins):
+    raise FileNotFoundError(f'whisper.cpp worker was not staged: {_worker_dir}')
 
 
 a = Analysis(
