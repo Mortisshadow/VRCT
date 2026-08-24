@@ -9,6 +9,7 @@ cmake --build "%ROOT%native\whisper_cpp_worker\build" --config Release --target 
 if errorlevel 1 exit /b %errorlevel%
 if exist "%STAGE%" rmdir /s /q "%STAGE%"
 mkdir "%STAGE%"
-for /r "%ROOT%native\whisper_cpp_worker\build" %%F in (vrct-whisper-worker.exe) do copy /y "%%~fF" "%STAGE%\"
+for /r "%ROOT%native\whisper_cpp_worker\build" %%F in (vrct-whisper-worker.exe) do if exist "%%~fF" copy /y "%%~fF" "%STAGE%\" >nul
 if not exist "%STAGE%\vrct-whisper-worker.exe" exit /b 1
 echo Staged worker under %STAGE%
+exit /b 0
