@@ -177,6 +177,38 @@ npm run release-all
 
 ## ビルドプロセスの詳細
 
+### whisper.cpp ネイティブワーカー
+
+配布版は、whisper.cpp v1.7.6（コミット `a8d002cfd879315632a579e73f0148d06959de36`）を GGML Vulkan 有効でビルドした
+`vrct-whisper-worker.exe` を使用します。Windows では Vulkan SDK と Visual Studio 2022
+が必要です。次のコマンドでビルドし、実行ファイルと DLL を PyInstaller 用 staging
+ディレクトリへコピーします:
+
+```bat
+bat\build_whisper_worker.bat
+```
+
+ビルド成果物は `native/whisper_cpp_worker/stage/whisper_cpp/` に置かれ、CPU/CUDA
+バックエンドの `_internal/whisper_cpp/` に自動収集されます。
+
+配布された VRCT では開発環境、CUDA、ROCm は不要です。通常の GPU ドライバーが
+提供する Vulkan 1.2+ ランタイムだけを使用します。設定画面で文字起こしエンジンを
+`Whisper`、ローカルバックエンドを `Whisper.cpp (Vulkan)` にし、モデルをダウンロード
+してください。RX 6750 XT 12 GB の推奨開始点は `large-v3-turbo-int8` です。この選択は
+whisper.cpp では `ggml-large-v3-turbo-q8_0.bin` に対応し、CTranslate2 の int8 変換と
+ビット単位で同一ではありません。その他のモデルは同名の公式 GGML モデルに対応し、
+`large-v3-turbo` は非量子化 GGML 版です。モデルは
+`weights/whisper_cpp/<model>/` に別キャッシュされます。
+
+同じ音声をモデルを保持したまま繰り返し測定する例:
+
+```bat
+.venv\Scripts\python.exe src-python\benchmark_whisper_backend.py --backend "Whisper.cpp (Vulkan)" --model large-v3-turbo-int8 --root src-python sample.wav -n 5
+```
+
+ログには選択バックエンド、Vulkan システム情報、GPU 有効状態、モデルロード時間、
+推論時間のみを記録し、文字起こし本文は記録しません。
+
 ### バージョン管理
 
 バージョンは `package.json` で一元管理され、以下のファイルに自動で同期されます:

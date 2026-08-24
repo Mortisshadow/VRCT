@@ -21,7 +21,13 @@ from speech_recognition.exceptions import UnknownValueError
 from datetime import timedelta
 from pyaudiowpatch import get_sample_size, paInt16
 from .transcription_languages import transcription_lang
-from .transcription_whisper import getWhisperModel, checkWhisperWeight
+from .transcription_whisper import checkWhisperWeight, checkWhisperCppWeight
+from .transcription_backend import (
+    FASTER_WHISPER_BACKEND,
+    WHISPER_CPP_VULKAN_BACKEND,
+    acquireBackend,
+    releaseBackend,
+)
 
 import numpy as np
 from pydub import AudioSegment
@@ -61,6 +67,8 @@ class AudioTranscriber:
         device: str = "cpu",
         device_index: int = 0,
         compute_type: str = "auto",
+        whisper_backend: str = FASTER_WHISPER_BACKEND,
+        backend_factory=None,
     ) -> None:
         self.speaker = speaker
         self.phrase_timeout = phrase_timeout
@@ -72,6 +80,7 @@ class AudioTranscriber:
         self.audio_recognizer.operation_timeout = GOOGLE_RECOGNIZE_TIMEOUT_SECONDS
         self.transcription_engine = "Google"
         self.whisper_model = None
+        self.whisper_backend = None
         self.whisper_weight_type = whisper_weight_type
         self.audio_sources: Dict[str, Any] = {
             "sample_rate": source.SAMPLE_RATE,
@@ -83,9 +92,15 @@ class AudioTranscriber:
             "process_data_func": self.processSpeakerData if speaker else self.processMicData,
         }
 
-        if transcription_engine == "Whisper" and checkWhisperWeight(root, whisper_weight_type) is True:
-            self.whisper_model = getWhisperModel(
-                root, whisper_weight_type, device=device, device_index=device_index, compute_type=compute_type
+        weight_available = (
+            checkWhisperCppWeight(root, whisper_weight_type)
+            if whisper_backend == WHISPER_CPP_VULKAN_BACKEND
+            else checkWhisperWeight(root, whisper_weight_type)
+        ) if root and whisper_weight_type else False
+        if transcription_engine == "Whisper" and weight_available:
+            self.whisper_backend = acquireBackend(
+                whisper_backend, root, whisper_weight_type, device=device,
+                device_index=device_index, compute_type=compute_type, factory=backend_factory,
             )
             self.transcription_engine = "Whisper"
 
@@ -139,37 +154,44 @@ class AudioTranscriber:
                         audio_data = audio_data.detach().numpy()
 
                     for language, country in zip(languages, countries):
-                        text = ""
                         source_language = (
                             transcription_lang[language][country][self.transcription_engine]
                             if len(languages) == 1
                             else None
                         )
-                        segments, info = self.whisper_model.transcribe(
-                            audio_data,
-                            beam_size=5,
-                            temperature=0.0,
-                            log_prob_threshold=avg_logprob,
-                            no_speech_threshold=no_speech_prob,
-                            language=source_language,
-                            word_timestamps=False,
-                            without_timestamps=True,
-                            task="transcribe",
-                            no_repeat_ngram_size=no_repeat_ngram_size,
-                        )
-                        for s in segments:
-                            if s.avg_logprob < avg_logprob or s.no_speech_prob > no_speech_prob:
-                                continue
-                            text += s.text
-                        confidences.append({"confidence": info.language_probability, "text": text, "language": language})
+                        if self.whisper_backend is not None:
+                            backend_result = self.whisper_backend.transcribe(
+                                audio_data, language=source_language, avg_logprob=avg_logprob,
+                                no_speech_prob=no_speech_prob,
+                                no_repeat_ngram_size=no_repeat_ngram_size,
+                            )
+                            text = backend_result.text
+                            detected_language = backend_result.language
+                            confidence = backend_result.confidence
+                        else:  # compatibility for injected legacy model test doubles
+                            text = ""
+                            segments, info = self.whisper_model.transcribe(
+                                audio_data, beam_size=5, temperature=0.0,
+                                log_prob_threshold=avg_logprob,
+                                no_speech_threshold=no_speech_prob, language=source_language,
+                                word_timestamps=False, without_timestamps=True,
+                                task="transcribe", no_repeat_ngram_size=no_repeat_ngram_size,
+                            )
+                            for segment in segments:
+                                if segment.avg_logprob >= avg_logprob and segment.no_speech_prob <= no_speech_prob:
+                                    text += segment.text
+                            detected_language = info.language
+                            confidence = info.language_probability
+                        confidences.append({"confidence": confidence, "text": text, "language": language})
                         if (len(languages) == 1) or (
-                            transcription_lang[language][country][self.transcription_engine] == info.language
+                            transcription_lang[language][country][self.transcription_engine] == detected_language
                         ):
                             break
 
         except UnknownValueError:
             pass
         except Exception:
+            self.last_recognition_error = True
             errorLogging()
 
         result = max(confidences, key=lambda x: x["confidence"])
@@ -236,3 +258,7 @@ class AudioTranscriber:
         self.transcript_data.clear()
         self.audio_sources["last_sample"] = bytes()
         self.audio_sources["new_phrase"] = True
+
+    def close(self) -> None:
+        releaseBackend(self.whisper_backend)
+        self.whisper_backend = None

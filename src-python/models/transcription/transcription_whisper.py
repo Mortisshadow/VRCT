@@ -9,10 +9,11 @@ This module exposes small utilities used by the transcription subsystem:
 The functions are defensive: failures are caught and reported by the caller.
 """
 
-from os import path as os_path, makedirs as os_makedirs, remove as os_remove
+from os import path as os_path, makedirs as os_makedirs, remove as os_remove, replace as os_replace
 from requests import get as requests_get
 from typing import Callable, Optional
 import logging
+import hashlib
 from utils import getBestComputeType, isWeightVerifiedCache, writeWeightVerifiedCache, errorLogging
 
 # Optional deps; None fallback lets checkWhisperWeight etc. return False
@@ -41,6 +42,21 @@ _MODELS = {
     "large-v3-turbo-int8": "Zoont/faster-whisper-large-v3-turbo-int8-ct2", #794MB
     "large-v3-turbo": "deepdml/faster-whisper-large-v3-turbo-ct2", #1.58GB
 }
+
+# Official whisper.cpp GGML models. The turbo-int8 CTranslate2 model has no
+# bit-identical whisper.cpp equivalent; q8_0 is the closest 8-bit mapping.
+_WHISPER_CPP_MODELS = {
+    "tiny": "ggml-tiny.bin",
+    "base": "ggml-base.bin",
+    "small": "ggml-small.bin",
+    "medium": "ggml-medium.bin",
+    "large-v1": "ggml-large-v1.bin",
+    "large-v2": "ggml-large-v2.bin",
+    "large-v3": "ggml-large-v3.bin",
+    "large-v3-turbo-int8": "ggml-large-v3-turbo-q8_0.bin",
+    "large-v3-turbo": "ggml-large-v3-turbo.bin",
+}
+_WHISPER_CPP_REPO = "ggerganov/whisper.cpp"
 
 _FILENAMES = [
     "config.json",
@@ -186,6 +202,65 @@ def getWhisperModel(
         if "CUDA out of memory" in error_message or "CUBLAS_STATUS_ALLOC_FAILED" in error_message:
             raise ValueError("VRAM_OUT_OF_MEMORY", error_message)
         raise
+
+
+def getWhisperCppModelPath(root: str, weight_type: str) -> str:
+    filename = _WHISPER_CPP_MODELS[weight_type]
+    return os_path.join(root, "weights", "whisper_cpp", weight_type, filename)
+
+
+def checkWhisperCppWeight(root: str, weight_type: str) -> bool:
+    """Check that a completed, non-empty official GGML model is cached."""
+    if weight_type not in _WHISPER_CPP_MODELS:
+        return False
+    model_path = getWhisperCppModelPath(root, weight_type)
+    if not os_path.isfile(model_path) or os_path.getsize(model_path) < 1024 * 1024:
+        return False
+    return isWeightVerifiedCache(os_path.dirname(model_path))
+
+
+def downloadWhisperCppWeight(root: str, weight_type: str,
+                             callback: Optional[Callable[[float], None]] = None,
+                             end_callback: Optional[Callable[[], None]] = None) -> None:
+    """Download and verify an official whisper.cpp GGML model atomically."""
+    if weight_type not in _WHISPER_CPP_MODELS:
+        raise ValueError(f"No whisper.cpp model mapping for {weight_type}")
+    target = getWhisperCppModelPath(root, weight_type)
+    directory = os_path.dirname(target)
+    os_makedirs(directory, exist_ok=True)
+    if not checkWhisperCppWeight(root, weight_type):
+        filename = _WHISPER_CPP_MODELS[weight_type]
+        url = huggingface_hub.hf_hub_url(_WHISPER_CPP_REPO, filename)
+        metadata = huggingface_hub.get_hf_file_metadata(url)
+        expected_size = getattr(metadata, "size", None)
+        expected_hash = str(getattr(metadata, "etag", "")).strip('"')
+        partial = target + ".part"
+        digest = hashlib.sha256()
+        downloaded = 0
+        try:
+            response = requests_get(url, stream=True)
+            response.raise_for_status()
+            with open(partial, "wb") as file:
+                for chunk in response.iter_content(chunk_size=1024 * 2000):
+                    if not chunk:
+                        continue
+                    file.write(chunk)
+                    digest.update(chunk)
+                    downloaded += len(chunk)
+                    if callable(callback) and expected_size:
+                        callback(min(1.0, downloaded / expected_size))
+            if expected_size and downloaded != expected_size:
+                raise IOError(f"whisper.cpp model size mismatch ({downloaded} != {expected_size})")
+            if len(expected_hash) == 64 and digest.hexdigest() != expected_hash:
+                raise IOError("whisper.cpp model SHA-256 mismatch")
+            os_replace(partial, target)
+            writeWeightVerifiedCache(directory)
+        except Exception:
+            if os_path.exists(partial):
+                os_remove(partial)
+            raise
+    if callable(end_callback):
+        end_callback()
 
 if __name__ == "__main__":
     def callback(value):

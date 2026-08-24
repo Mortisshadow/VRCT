@@ -201,9 +201,29 @@ const TranscriptionEngine_Container = () => {
         <div>
             <SectionLabelComponent label={t("config_page.transcription.section_label_transcription_engines")} />
             <TranscriptionEngine_Box />
+            <WhisperBackend_Box />
             <WhisperWeightType_Box />
             <TranscriptionComputeDevice_Box />
         </div>
+    );
+};
+
+const WhisperBackend_Box = () => {
+    const { t } = useI18n();
+    const {
+        currentWhisperBackends,
+        currentSelectedWhisperBackend,
+        setSelectedWhisperBackend,
+    } = useTranscription();
+    const options = (currentWhisperBackends.data || []).map(id => ({ id, label: id }));
+    return (
+        <RadioButtonContainer
+            label={t("config_page.transcription.whisper_backend.label")}
+            selectFunction={setSelectedWhisperBackend}
+            name="select_whisper_backend"
+            options={options}
+            checked_variable={currentSelectedWhisperBackend}
+        />
     );
 };
 
@@ -232,7 +252,11 @@ const WhisperWeightType_Box = () => {
         pendingWhisperWeightTypeStatus,
         downloadWhisperWeightTypeStatus,
     } = useTranscription();
-    const { currentSelectedWhisperWeightType, setSelectedWhisperWeightType } = useTranscription();
+    const {
+        currentSelectedWhisperWeightType,
+        setSelectedWhisperWeightType,
+        currentSelectedWhisperBackend,
+    } = useTranscription();
 
     const selectFunction = (id) => {
         setSelectedWhisperWeightType(id);
@@ -243,10 +267,17 @@ const WhisperWeightType_Box = () => {
         downloadWhisperWeightTypeStatus(id);
     };
 
+    const cppCapacities = {
+        "tiny": "~75MB GGML", "base": "~142MB GGML", "small": "~466MB GGML",
+        "medium": "~1.5GB GGML", "large-v1": "~3.1GB GGML",
+        "large-v2": "~3.1GB GGML", "large-v3": "~3.1GB GGML",
+        "large-v3-turbo-int8": "~874MB GGML q8_0", "large-v3-turbo": "~1.6GB GGML",
+    };
+    const usingCpp = currentSelectedWhisperBackend.data === "Whisper.cpp (Vulkan)";
     const whisper_weight_types = currentWhisperWeightTypeStatus.data.map(item => {
         return {
             ...item,
-            label: `${item.id} (${item.capacity})`,
+            label: `${item.id} (${usingCpp ? cppCapacities[item.id] : item.capacity})`,
         };
     });
 

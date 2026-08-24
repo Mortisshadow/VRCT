@@ -4,11 +4,18 @@ import os
 
 _use_upx = os.environ.get("VRCT_PYINSTALLER_UPX") == "1"
 
+_worker_dir = os.path.abspath('./../native/whisper_cpp_worker/stage/whisper_cpp')
+_worker_bins = []
+if os.path.isdir(_worker_dir):
+    _worker_bins = [(os.path.join(_worker_dir, f), 'whisper_cpp')
+                    for f in os.listdir(_worker_dir)
+                    if f.lower().endswith(('.exe', '.dll'))]
+
 
 a = Analysis(
     ['..\\src-python\\mainloop.py'],
     pathex=[],
-    binaries=[],
+    binaries=_worker_bins,
     datas=[
         ('./../src-python/models/overlay/fonts', 'fonts/'),
         ('./../src-python/models/translation/translation_settings/prompt', 'translation_settings/prompt/'),

@@ -534,6 +534,22 @@ export const SETTINGS_ARRAY = [
     },
     {
         Category: "Transcription",
+        Base_Name: "WhisperBackends",
+        default_value: [],
+        ui_template_id: "list",
+        logics_template_id: "get_set",
+        base_endpoint_name: "whisper_backends",
+    },
+    {
+        Category: "Transcription",
+        Base_Name: "SelectedWhisperBackend",
+        default_value: "Faster-Whisper (CPU/CUDA)",
+        ui_template_id: "select",
+        logics_template_id: "get_set",
+        base_endpoint_name: "selected_whisper_backend",
+    },
+    {
+        Category: "Transcription",
         Base_Name: "WhisperWeightTypeStatus",
         default_value: whisper_weight_type_status,
         ui_template_id: "list",

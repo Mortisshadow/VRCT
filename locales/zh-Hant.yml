@@ -236,6 +236,8 @@ config_page:
             desc: "只有在單詞超過此數量時，才會記錄結果並發送到 VRChat。"
         select_transcription_engine:
             label: "語音辨識使用的引擎"
+        whisper_backend:
+            label: "本機 Whisper 後端"
         whisper_weight_type:
             label: "Whisper 模型類型"
             desc: "容量越大的模型精度越高，但會占用更多 CPU/GPU 資源。\n※特別是比 medium 更大的模型，根據 CPU/GPU 效能可能難以使用。"

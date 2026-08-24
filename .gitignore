@@ -8,6 +8,7 @@ logs/
 .venv/
 .venv_cuda/
 weights/
+native/whisper_cpp_worker/stage/
 .vscode
 error.log
 *.exe

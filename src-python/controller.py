@@ -1119,9 +1119,9 @@ class Controller:
     def getSelectedTranscriptionEngine(*args, **kwargs) -> dict:
         return {"status":200, "result":config.SELECTED_TRANSCRIPTION_ENGINE}
 
-    @staticmethod
-    def setSelectedTranscriptionEngine(data, *args, **kwargs) -> dict:
+    def setSelectedTranscriptionEngine(self, data, *args, **kwargs) -> dict:
         config.SELECTED_TRANSCRIPTION_ENGINE = str(data)
+        model.reloadTranscriptionSessions()
         return {"status":200, "result":config.SELECTED_TRANSCRIPTION_ENGINE}
 
     @staticmethod
@@ -2710,10 +2710,30 @@ class Controller:
     def getWhisperWeightType(*args, **kwargs) -> dict:
         return {"status":200, "result":config.WHISPER_WEIGHT_TYPE}
 
-    @staticmethod
-    def setWhisperWeightType(data, *args, **kwargs) -> dict:
+    def setWhisperWeightType(self, data, *args, **kwargs) -> dict:
         config.WHISPER_WEIGHT_TYPE = str(data)
+        model.reloadTranscriptionSessions()
         return {"status":200, "result": config.WHISPER_WEIGHT_TYPE}
+
+    @staticmethod
+    def getWhisperBackends(*args, **kwargs) -> dict:
+        return {"status": 200, "result": list(config.SELECTABLE_WHISPER_BACKEND_LIST)}
+
+    @staticmethod
+    def getSelectedWhisperBackend(*args, **kwargs) -> dict:
+        return {"status": 200, "result": config.SELECTED_WHISPER_BACKEND}
+
+    def setSelectedWhisperBackend(self, data, *args, **kwargs) -> dict:
+        config.SELECTED_WHISPER_BACKEND = str(data)
+        if hasattr(self, '_whisper_available_cache'):
+            del self._whisper_available_cache
+        self.updateDownloadedWhisperModelWeight()
+        model.reloadTranscriptionSessions()
+        return {"status": 200, "result": config.SELECTED_WHISPER_BACKEND}
+
+    @staticmethod
+    def getWhisperBackendStatus(*args, **kwargs) -> dict:
+        return {"status": 200, "result": model.getWhisperBackendStatus()}
 
     @staticmethod
     def getSelectedTranscriptionComputeType(*args, **kwargs) -> dict:

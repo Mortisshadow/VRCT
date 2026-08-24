@@ -11,12 +11,32 @@ from models.transcription.transcription_transcriber import (
     AudioTranscriber,
     GOOGLE_RECOGNIZE_TIMEOUT_SECONDS,
 )
+from models.transcription.transcription_backend import BackendResult, _registry
 
 
 class FakeAudioSource:
     SAMPLE_RATE = 16000
     SAMPLE_WIDTH = 2
     channels = 1
+
+
+class TestWhisperAudioConversion(unittest.TestCase):
+    @patch("models.transcription.transcription_transcriber.checkWhisperWeight", return_value=True)
+    def test_int16_audio_is_normalized_float32_for_backend(self, _):
+        seen = {}
+        class Backend:
+            def transcribe(self, audio, **kwargs):
+                seen["audio"] = audio
+                return BackendResult("ok", "en", 1.0)
+            def close(self): pass
+        transcriber = AudioTranscriber(False, FakeAudioSource(), 3, 10, "Whisper", root=".", whisper_weight_type="m", backend_factory=lambda: Backend())
+        q = Queue(); q.put((np.array([32767, -32768], dtype="<i2").tobytes(), datetime.now()))
+        transcriber.transcribeAudioQueue(q, ["Japanese"], ["Japan"])
+        self.assertEqual(seen["audio"].dtype, np.float32)
+        np.testing.assert_allclose(seen["audio"], [32767 / 32768.0, -1.0], rtol=1e-6)
+        shared = transcriber.whisper_backend
+        from models.transcription.transcription_backend import releaseBackend
+        releaseBackend(shared); _registry.clear()
 
 
 class TestAudioProcessingSelection(unittest.TestCase):

@@ -31,7 +31,13 @@ from models.transcription.transcription_transcriber import AudioTranscriber
 from models.translation.translation_languages import translation_lang
 from models.transcription.transcription_languages import transcription_lang
 from models.translation.translation_utils import checkCTranslate2Weight, downloadCTranslate2Weight, downloadCTranslate2Tokenizer, backwardCompatibleRenameWeightsDir
-from models.transcription.transcription_whisper import checkWhisperWeight, downloadWhisperWeight
+from models.transcription.transcription_whisper import (
+    checkWhisperWeight, downloadWhisperWeight,
+    checkWhisperCppWeight, downloadWhisperCppWeight,
+)
+from models.transcription.transcription_backend import (
+    WHISPER_CPP_VULKAN_BACKEND, getBackendStatus,
+)
 from models.transliteration.transliteration_transliterator import Transliterator
 from models.overlay.overlay import Overlay
 from models.overlay.overlay_image import OverlayImage
@@ -334,6 +340,7 @@ class _AudioDeviceSession:
             def endTranscript() -> None:
                 while not audio_queue.empty():
                     audio_queue.get()
+                transcriber.close()
                 self._transcriber = None
                 # 明示 gc.collect() は呼ばない: ActiveEndpointTracker が別スレッド
                 # (CoInitialize 済み apartment) で保持している comtypes の COM
@@ -367,6 +374,8 @@ class _AudioDeviceSession:
             if self._print_transcript.is_alive():
                 printLog(f"{self._kind.capitalize()} transcription thread did not terminate within timeout")
             self._print_transcript = None
+        if self._transcriber is not None:
+            self._transcriber.close()
         if isinstance(self._energy_progressbar, threadFnc):
             self._energy_progressbar.stop()
             self._energy_progressbar.join()
@@ -423,6 +432,7 @@ class MicSession(_AudioDeviceSession):
             device=config.SELECTED_TRANSCRIPTION_COMPUTE_DEVICE["device"],
             device_index=config.SELECTED_TRANSCRIPTION_COMPUTE_DEVICE["device_index"],
             compute_type=config.SELECTED_TRANSCRIPTION_COMPUTE_TYPE,
+            whisper_backend=config.SELECTED_WHISPER_BACKEND,
         )
 
     def _transcribe(self, transcriber: AudioTranscriber, queue: Queue) -> bool:
@@ -480,6 +490,7 @@ class SpeakerSession(_AudioDeviceSession):
             device=config.SELECTED_TRANSCRIPTION_COMPUTE_DEVICE["device"],
             device_index=config.SELECTED_TRANSCRIPTION_COMPUTE_DEVICE["device_index"],
             compute_type=config.SELECTED_TRANSCRIPTION_COMPUTE_TYPE,
+            whisper_backend=config.SELECTED_WHISPER_BACKEND,
         )
 
     def _transcribe(self, transcriber: AudioTranscriber, queue: Queue) -> bool:
@@ -604,10 +615,17 @@ class Model:
         self.translator.setChangedTranslatorParameters(is_changed)
 
     def checkTranscriptionWhisperModelWeight(self, weight_type:str):
+        if config.SELECTED_WHISPER_BACKEND == WHISPER_CPP_VULKAN_BACKEND:
+            return checkWhisperCppWeight(config.PATH_LOCAL, weight_type)
         return checkWhisperWeight(config.PATH_LOCAL, weight_type)
 
     def downloadWhisperModelWeight(self, weight_type, callback=None, end_callback=None):
+        if config.SELECTED_WHISPER_BACKEND == WHISPER_CPP_VULKAN_BACKEND:
+            return downloadWhisperCppWeight(config.PATH_LOCAL, weight_type, callback, end_callback)
         return downloadWhisperWeight(config.PATH_LOCAL, weight_type, callback, end_callback)
+
+    def getWhisperBackendStatus(self):
+        return getBackendStatus()
 
     def resetKeywordProcessor(self):
         self.ensure_initialized()
@@ -1221,6 +1239,14 @@ class Model:
     def stopSpeakerTranscript(self):
         self.ensure_initialized()
         self._speaker_session.reconfigure(transcript=False)
+
+    def reloadTranscriptionSessions(self) -> None:
+        """Apply a backend/model change and release the old shared model."""
+        self.ensure_initialized()
+        for session in (self._mic_session, self._speaker_session):
+            if "transcript" in session.features:
+                session.reconfigure(transcript=False)
+                session.reconfigure(transcript=True)
 
     def startCheckSpeakerEnergy(self, fnc:Optional[Callable[[float], None]]=None) -> None:
         self.ensure_initialized()

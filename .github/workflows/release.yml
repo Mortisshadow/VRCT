@@ -35,6 +35,14 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: choco install vulkan-sdk --no-progress -y
+
+      - name: Build whisper.cpp Vulkan worker
+        shell: cmd
+        run: bat\build_whisper_worker.bat
+
       - name: Setup Python environment
         run: npm run setup-python
 
