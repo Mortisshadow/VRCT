@@ -27,7 +27,7 @@ a = Analysis(
         ('./../.venv_cuda/Lib/site-packages/faster_whisper', 'faster_whisper/'),
         ('./../.venv/Lib/site-packages/hf_xet', 'hf_xet/')
         ],
-    hiddenimports=['faster_whisper.vad', 'models.transcription.audio_pipeline'],
+    hiddenimports=['faster_whisper.vad'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

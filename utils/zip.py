@@ -2,7 +2,6 @@ import zipfile
 import argparse
 from pathlib import Path
 import time
-from tqdm import tqdm # tqdmをインポート
 
 def zip_files_and_directory(zip_name, file_paths, dir_paths, verbose=False):
     zip_file_path = Path(zip_name)
@@ -14,7 +13,7 @@ def zip_files_and_directory(zip_name, file_paths, dir_paths, verbose=False):
     try:
         with zipfile.ZipFile(zip_file_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             # ファイルを追加
-            for file_path_str in tqdm(file_paths, desc="Adding files", unit="file"):
+            for file_path_str in file_paths:
                 file_path = Path(file_path_str)
                 if file_path.is_file():
                     zipf.write(file_path, file_path.name)
@@ -26,7 +25,7 @@ def zip_files_and_directory(zip_name, file_paths, dir_paths, verbose=False):
                 dir_path = Path(dir_path_str)
                 if dir_path.is_dir():
                     all_files_in_dir = [item for item in dir_path.rglob("*") if item.is_file()]
-                    for item in tqdm(all_files_in_dir, desc=f"Adding files from {dir_path.name}", unit="file"):
+                    for item in all_files_in_dir:
                         # ディレクトリ構造を保持しつつ、ルートに配置
                         arcname = Path(dir_path.name) / item.relative_to(dir_path)
                         zipf.write(item, arcname)

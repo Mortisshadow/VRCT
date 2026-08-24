@@ -33,6 +33,20 @@ jobs:
           python-version: '3.11'
           cache: pip
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Restore cached Vulkan worker
+        uses: actions/cache@v4
+        with:
+          path: native/whisper_cpp_worker/stage/whisper_cpp
+          key: windows-x64-whisper-vulkan-${{ hashFiles('native/whisper_cpp_worker/CMakeLists.txt', 'native/whisper_cpp_worker/main.cpp') }}
+      - name: Restore cached CPU Python environment
+        id: python-environment-cache
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: windows-python-3.11-cpu-${{ hashFiles('requirements.txt') }}
       - name: Install JavaScript dependencies
         run: npm install
       - name: Install Vulkan SDK
@@ -59,8 +73,9 @@ jobs:
             Write-Warning 'dumpbin was unavailable; native startup probe still passed'
           }
       - name: Install Python dependencies
+        if: steps.python-environment-cache.outputs.cache-hit != 'true'
         shell: cmd
-        run: bat\install.bat
+        run: bat\install_cpu.bat
       - name: Run backend, lifecycle, and model tests
         shell: cmd
         run: |
