@@ -10,7 +10,7 @@ from os import path as os_path
 import struct
 import subprocess
 import sys
-from threading import Condition, Event, Lock, Thread, current_thread
+from threading import Condition, Event, Lock, Thread, Timer, current_thread
 from time import monotonic
 from typing import Callable, Dict, Optional, Tuple
 
@@ -25,6 +25,7 @@ _REQUEST = struct.Struct("<IIIIIffi")
 _RESPONSE = struct.Struct("<IifdIII")
 _READY_TIMEOUT_SECONDS = 60
 _TRANSCRIBE_TIMEOUT_SECONDS = 120
+_BACKEND_IDLE_GRACE_SECONDS = 5.0
 
 logger = logging.getLogger("vrct.transcription")
 
@@ -275,6 +276,7 @@ class _SharedBackend:
         self.refs = 1
         self.active_calls = 0
         self.closing = False
+        self.release_generation = 0
         self.backend: Optional[TranscriptionBackend] = None
         self.condition = Condition()
         self.status = BackendStatus(backend=key[0], state="loading", model=key[2])
@@ -337,6 +339,10 @@ def acquireBackend(backend_name: str, root: str, model: str, device: str = "cpu"
         shared = _registry.get(key)
         if shared is not None:
             shared.refs += 1
+            # Invalidate a pending deferred release. Recorder/device
+            # reconfiguration commonly stops and restarts a session within a
+            # few milliseconds and must not unload the resident model.
+            shared.release_generation += 1
             return shared
         cls = WhisperCppVulkanBackend if backend_name == WHISPER_CPP_VULKAN_BACKEND else FasterWhisperBackend
         def default_factory():
@@ -352,12 +358,11 @@ def acquireBackend(backend_name: str, root: str, model: str, device: str = "cpu"
         return shared
 
 
-def releaseBackend(shared: Optional[_SharedBackend]) -> None:
-    if shared is None:
-        return
+def _closeBackendIfUnused(shared: _SharedBackend, generation: int) -> None:
     with _registry_lock:
-        shared.refs -= 1
-        if shared.refs > 0:
+        if shared.refs > 0 or shared.release_generation != generation:
+            return
+        if _registry.get(shared.key) is not shared:
             return
         _registry.pop(shared.key, None)
     with shared.condition:
@@ -367,6 +372,23 @@ def releaseBackend(shared: Optional[_SharedBackend]) -> None:
         shared.status.state = "closed"
     if backend is not None:
         backend.close()
+
+
+def releaseBackend(shared: Optional[_SharedBackend], *, deferred: bool = False) -> None:
+    if shared is None:
+        return
+    with _registry_lock:
+        shared.refs -= 1
+        if shared.refs > 0:
+            return
+        shared.release_generation += 1
+        generation = shared.release_generation
+    if deferred:
+        timer = Timer(_BACKEND_IDLE_GRACE_SECONDS, _closeBackendIfUnused, args=(shared, generation))
+        timer.daemon = True
+        timer.start()
+    else:
+        _closeBackendIfUnused(shared, generation)
 
 
 def getBackendStatus() -> dict:

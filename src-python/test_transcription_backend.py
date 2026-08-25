@@ -42,6 +42,23 @@ class TestBackendLifecycle(unittest.TestCase):
         releaseBackend(one); self.assertEqual(made[0].closed, 0)
         releaseBackend(two); self.assertEqual(made[0].closed, 1); self.assertNotIn(one.key, _registry)
 
+    def test_deferred_release_is_cancelled_by_immediate_reacquire(self):
+        made = []
+        def factory():
+            item = FakeBackend(); made.append(item); return item
+        with patch("models.transcription.transcription_backend._BACKEND_IDLE_GRACE_SECONDS", .02):
+            first = acquireBackend(FASTER_WHISPER_BACKEND, ".", "m", factory=factory)
+            first.transcribe(np.zeros(1, dtype=np.float32), language=None, avg_logprob=0,
+                             no_speech_prob=1, no_repeat_ngram_size=0)
+            releaseBackend(first, deferred=True)
+            second = acquireBackend(FASTER_WHISPER_BACKEND, ".", "m", factory=factory)
+            time.sleep(.04)
+        self.assertIs(first, second)
+        self.assertEqual(len(made), 1)
+        self.assertEqual(made[0].closed, 0)
+        releaseBackend(second)
+        self.assertEqual(made[0].closed, 1)
+
     def test_async_load_error_is_reported(self):
         shared = acquireBackend("bad", ".", "m", factory=lambda: (_ for _ in ()).throw(RuntimeError("no model")))
         with self.assertRaisesRegex(RuntimeError, "no model"):

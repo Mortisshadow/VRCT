@@ -341,7 +341,11 @@ class _AudioDeviceSession:
                 while not audio_queue.empty():
                     audio_queue.get()
                 transcriber.close()
-                self._transcriber = None
+                # A timed-out stop may already have started a replacement
+                # session. The old thread must never clear that new owner's
+                # transcriber reference when it eventually exits.
+                if self._transcriber is transcriber:
+                    self._transcriber = None
                 # 明示 gc.collect() は呼ばない: ActiveEndpointTracker が別スレッド
                 # (CoInitialize 済み apartment) で保持している comtypes の COM
                 # ポインタが、この _print_transcript スレッド (CoInitialize

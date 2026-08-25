@@ -270,4 +270,7 @@ class AudioTranscriber:
             # Detach first so session-stop and worker end callbacks can safely race.
             backend = self.whisper_backend
             self.whisper_backend = None
-        releaseBackend(backend)
+        # Device monitoring can stop/start the owning session back-to-back.
+        # Keep the shared model briefly available so that transient recorder
+        # reconfiguration does not tear down and reload the Vulkan context.
+        releaseBackend(backend, deferred=True)
