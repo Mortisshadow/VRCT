@@ -65,6 +65,14 @@ jobs:
         run: |
           & native\whisper_cpp_worker\stage\whisper_cpp\vrct-whisper-worker.exe --probe
           if ($LASTEXITCODE -ne 0) { throw 'Native worker probe failed' }
+          @'
+          import subprocess
+          worker = r"native\whisper_cpp_worker\stage\whisper_cpp\vrct-whisper-worker.exe"
+          payload = bytes((0x0d, 0x0a, 0x1a, 0x00))
+          result = subprocess.run([worker, "--pipe-probe"], input=payload, capture_output=True, check=True)
+          if result.stdout != payload:
+              raise SystemExit(f"binary pipe probe changed bytes: {result.stdout!r}")
+          '@ | python -
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $dumpbin = if (Test-Path $vswhere) {
             & $vswhere -latest -products * -find **\Hostx64\x64\dumpbin.exe | Select-Object -First 1

@@ -9,6 +9,10 @@
 #include <cmath>
 #include <string>
 #include <vector>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 namespace {
 constexpr uint32_t MAGIC = 0x54524356u; // "VCRT" little-endian
@@ -40,12 +44,31 @@ ggml_backend_dev_t gpu_device_at(int requested) {
 }
 
 int main(int argc, char **argv) {
-    std::string model; int threads = 4; int device = 0; bool probe = false;
+#ifdef _WIN32
+    // Python and this worker exchange packed structs and raw float32 samples.
+    // MSVC starts standard streams in text mode, where CR/LF translation and
+    // the legacy Ctrl-Z EOF marker can corrupt or truncate arbitrary audio.
+    // The ready line remains valid in binary mode and is still newline-delimited.
+    if (_setmode(_fileno(stdin), _O_BINARY) == -1 ||
+        _setmode(_fileno(stdout), _O_BINARY) == -1) {
+        std::cerr << "failed to switch worker pipes to binary mode\n";
+        return 4;
+    }
+#endif
+    std::string model; int threads = 4; int device = 0; bool probe = false; bool pipe_probe = false;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
         else if (!std::strcmp(argv[i], "--threads") && i + 1 < argc) threads = std::max(1, std::atoi(argv[++i]));
         else if (!std::strcmp(argv[i], "--device") && i + 1 < argc) device = std::max(0, std::atoi(argv[++i]));
         else if (!std::strcmp(argv[i], "--probe")) probe = true;
+        else if (!std::strcmp(argv[i], "--pipe-probe")) pipe_probe = true;
+    }
+    if (pipe_probe) {
+        char payload[4];
+        if (!std::cin.read(payload, sizeof(payload))) return 8;
+        std::cout.write(payload, sizeof(payload));
+        std::cout.flush();
+        return std::cout ? 0 : 9;
     }
     if (probe) {
         const char *raw = whisper_print_system_info();
@@ -74,11 +97,32 @@ int main(int argc, char **argv) {
     for (;;) {
         uint32_t magic, version, command, lang_len, samples; float avg_logprob, no_speech; int32_t ngram;
         if (!read_one(magic) || !read_one(version) || !read_one(command) || !read_one(lang_len) || !read_one(samples) ||
-            !read_one(avg_logprob) || !read_one(no_speech) || !read_one(ngram)) break;
-        std::string language; if (!read_bytes(language, lang_len)) break;
-        pcm.resize(samples); if (samples && !std::cin.read(reinterpret_cast<char *>(pcm.data()), samples * sizeof(float))) break;
+            !read_one(avg_logprob) || !read_one(no_speech) || !read_one(ngram)) {
+            std::cerr << "worker stdin closed while waiting for a request header\n";
+            whisper_free(ctx);
+            return 10;
+        }
+        std::cerr << "request command=" << command << " samples=" << samples
+                  << " language_bytes=" << lang_len << "\n";
+        if (lang_len > 64 || samples > 16000u * 60u * 30u) {
+            std::cerr << "request rejected due to invalid payload size\n";
+            return 5;
+        }
+        std::string language;
+        if (!read_bytes(language, lang_len)) {
+            std::cerr << "worker stdin closed while reading request language\n";
+            return 6;
+        }
+        pcm.resize(samples);
+        if (samples && !std::cin.read(reinterpret_cast<char *>(pcm.data()), samples * sizeof(float))) {
+            std::cerr << "worker stdin closed while reading float32 audio payload\n";
+            return 7;
+        }
         if (magic != MAGIC || version != VERSION) { response(-2, 0, 0, "", "", "invalid request header"); continue; }
-        if (command == 2) break;
+        if (command == 2) {
+            std::cerr << "worker received graceful shutdown command\n";
+            break;
+        }
         if (command != 1) { response(-3, 0, 0, "", "", "unknown command"); continue; }
         const bool silent = std::none_of(pcm.begin(), pcm.end(), [](float sample) { return std::fabs(sample) > 1.0e-6f; });
         if (pcm.size() < 1600 || silent) {
