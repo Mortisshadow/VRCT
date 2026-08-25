@@ -59,10 +59,16 @@ class TestBackendLifecycle(unittest.TestCase):
         self.assertIs(shared.backend, faster.return_value)
 
     def test_backend_controller_endpoints_are_registered(self):
-        source = (__import__("pathlib").Path(__file__).with_name("mainloop.py")).read_text(encoding="utf-8")
+        path = __import__("pathlib").Path(__file__)
+        source = path.with_name("mainloop.py").read_text(encoding="utf-8")
         self.assertIn('"/get/data/whisper_backends"', source)
         self.assertIn('"/get/data/selected_whisper_backend"', source)
         self.assertIn('"/set/data/selected_whisper_backend"', source)
+        ui_source = (path.parent.parent / "src-ui" / "logics" / "configs" /
+                     "config_page_setter" / "ui_config_setter.js").read_text(encoding="utf-8")
+        whisper_config = ui_source[ui_source.index('Base_Name: "WhisperBackends"'):
+                                   ui_source.index('Base_Name: "SelectedWhisperBackend"')]
+        self.assertIn('add_endpoint_run_array: ["from_backend"]', whisper_config)
 
 
 class FakeProcess:

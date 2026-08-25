@@ -538,6 +538,7 @@ export const SETTINGS_ARRAY = [
         default_value: [],
         ui_template_id: "list",
         logics_template_id: "get_set",
+        add_endpoint_run_array: ["from_backend"],
         base_endpoint_name: "whisper_backends",
     },
     {
