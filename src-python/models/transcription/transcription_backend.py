@@ -287,7 +287,12 @@ class _SharedBackend:
         try:
             backend = factory()
             with self.condition:
-                if self.refs <= 0:
+                # A zero refcount can be temporary while an audio device is
+                # reconfigured. Deferred release owns that decision; only an
+                # already-committed close may discard a backend that finished
+                # loading. Otherwise publish it so an immediate reacquire can
+                # reuse the same resident model.
+                if self.closing:
                     backend.close()
                     self.status.state = "closed"
                     self.condition.notify_all()

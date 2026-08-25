@@ -59,6 +59,25 @@ class TestBackendLifecycle(unittest.TestCase):
         releaseBackend(second)
         self.assertEqual(made[0].closed, 1)
 
+    def test_reacquire_while_model_is_loading_does_not_close_loaded_backend(self):
+        made = []
+        allow_load = threading.Event()
+        def factory():
+            allow_load.wait(1)
+            item = FakeBackend(); made.append(item); return item
+        with patch("models.transcription.transcription_backend._BACKEND_IDLE_GRACE_SECONDS", .1):
+            first = acquireBackend(FASTER_WHISPER_BACKEND, ".", "m", factory=factory)
+            releaseBackend(first, deferred=True)
+            second = acquireBackend(FASTER_WHISPER_BACKEND, ".", "m", factory=factory)
+            allow_load.set()
+            result = second.transcribe(np.zeros(1, dtype=np.float32), language=None,
+                                       avg_logprob=0, no_speech_prob=1,
+                                       no_repeat_ngram_size=0)
+        self.assertEqual(result.text, "ok")
+        self.assertEqual(len(made), 1)
+        self.assertEqual(made[0].closed, 0)
+        releaseBackend(second)
+
     def test_async_load_error_is_reported(self):
         shared = acquireBackend("bad", ".", "m", factory=lambda: (_ for _ in ()).throw(RuntimeError("no model")))
         with self.assertRaisesRegex(RuntimeError, "no model"):
