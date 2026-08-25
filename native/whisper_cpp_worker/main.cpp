@@ -55,7 +55,7 @@ int main(int argc, char **argv) {
     }
     if (model.empty()) { std::cerr << "--model is required\n"; return 2; }
     const auto load_started = std::chrono::steady_clock::now();
-    auto lp = whisper_context_default_params(); lp.use_gpu = true; lp.gpu_device = device;
+    auto lp = whisper_context_default_params(); lp.use_gpu = true; lp.flash_attn = false; lp.gpu_device = device;
     whisper_context *ctx = whisper_init_from_file_with_params(model.c_str(), lp);
     if (!ctx) { std::cerr << "failed to load whisper model\n"; return 3; }
     const char *raw_system_info = whisper_print_system_info();
@@ -86,10 +86,13 @@ int main(int argc, char **argv) {
             continue;
         }
         auto started = std::chrono::steady_clock::now();
-        auto params = whisper_full_default_params(WHISPER_SAMPLING_BEAM_SEARCH);
+        // Greedy decoding is whisper.cpp's normal low-latency path. Beam search
+        // multiplies Vulkan decoder work and has triggered driver crashes on
+        // some AMD devices without materially helping short VRCT phrases.
+        auto params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
         params.n_threads = threads; params.no_timestamps = true; params.temperature = 0.0f;
         params.language = language.empty() ? "auto" : language.c_str(); params.translate = false;
-        params.no_speech_thold = no_speech; params.logprob_thold = avg_logprob; params.beam_search.beam_size = 5;
+        params.no_speech_thold = no_speech; params.logprob_thold = avg_logprob; params.greedy.best_of = 1;
         params.single_segment = false; params.print_progress = false; params.print_realtime = false; params.print_timestamps = false;
         int rc = whisper_full(ctx, params, pcm.data(), static_cast<int>(pcm.size()));
         double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();

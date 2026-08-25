@@ -3,7 +3,7 @@ project(vrct_whisper_worker LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(WHISPER_CPP_TAG a8d002cfd879315632a579e73f0148d06959de36 CACHE STRING "Pinned whisper.cpp v1.7.6 commit")
+set(WHISPER_CPP_TAG 371b5a7561823ab2bb32142d2751e35e7534727b CACHE STRING "Pinned whisper.cpp v1.9.3 commit")
 
 include(FetchContent)
 FetchContent_Declare(whisper_cpp

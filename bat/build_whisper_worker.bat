@@ -2,7 +2,6 @@
 setlocal
 set ROOT=%~dp0..\
 set STAGE=%ROOT%native\whisper_cpp_worker\stage\whisper_cpp
-if exist "%STAGE%\vrct-whisper-worker.exe" exit /b 0
 cmake -S "%ROOT%native\whisper_cpp_worker" -B "%ROOT%native\whisper_cpp_worker\build" -A x64 -DGGML_VULKAN=ON
 if errorlevel 1 exit /b %errorlevel%
 cmake --build "%ROOT%native\whisper_cpp_worker\build" --config Release --target vrct-whisper-worker

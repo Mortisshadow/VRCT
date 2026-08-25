@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import dataclass, asdict
 import logging
 from os import path as os_path
@@ -126,6 +127,8 @@ class WhisperCppVulkanBackend(TranscriptionBackend):
         )
         self._io_lock = Lock()
         self._closed = False
+        self._stderr_tail = deque(maxlen=40)
+        self._diagnostic_path = os_path.join(root, "whisper_cpp.log")
         # Drain diagnostics during model initialization as ggml can emit enough
         # device/model detail to fill a Windows pipe before the ready marker.
         self._stderr_thread = Thread(target=self._drain_stderr, daemon=True, name="WhisperCppDiagnostics")
@@ -162,23 +165,41 @@ class WhisperCppVulkanBackend(TranscriptionBackend):
             raise RuntimeError("whisper.cpp started without an active Vulkan GPU backend")
 
     def _drain_stderr(self) -> None:
-        for raw_line in iter(self._process.stderr.readline, b""):
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if line:
-                logger.info("whisper.cpp: %s", line)
+        try:
+            with open(self._diagnostic_path, "a", encoding="utf-8") as diagnostic:
+                for raw_line in iter(self._process.stderr.readline, b""):
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if line:
+                        self._stderr_tail.append(line)
+                        diagnostic.write(line + "\n")
+                        diagnostic.flush()
+                        logger.info("whisper.cpp: %s", line)
+        except Exception:
+            logger.exception("Could not write whisper.cpp diagnostics")
+
+    def _worker_exit_error(self) -> RuntimeError:
+        return_code = self._process.poll()
+        details = self._stderr_tail[-1] if self._stderr_tail else "no native diagnostic output"
+        return RuntimeError(
+            f"whisper.cpp worker exited unexpectedly (exit_code={return_code}): {details}"
+        )
 
     def transcribe(self, audio, *, language, avg_logprob, no_speech_prob,
                    no_repeat_ngram_size) -> BackendResult:
         language_bytes = (language or "").encode("utf-8")
-        samples = audio.astype("<f4", copy=False).tobytes()
-        header = _REQUEST.pack(_MAGIC, 1, 1, len(language_bytes), len(audio),
+        # The wire protocol is a flat float32 sample stream. Normalizing here
+        # prevents a sliced/non-contiguous array or accidental extra dimension
+        # from desynchronizing the persistent worker protocol.
+        audio = audio.reshape(-1).astype("<f4", copy=False)
+        samples = audio.tobytes(order="C")
+        header = _REQUEST.pack(_MAGIC, 1, 1, len(language_bytes), audio.size,
                                avg_logprob, no_speech_prob, no_repeat_ngram_size)
         exchange_result = {}
         def exchange() -> None:
             try:
                 with self._io_lock:
                     if self._process.poll() is not None:
-                        raise RuntimeError("whisper.cpp worker exited unexpectedly")
+                        raise self._worker_exit_error()
                     self._process.stdin.write(header)
                     self._process.stdin.write(language_bytes)
                     self._process.stdin.write(samples)
@@ -191,6 +212,13 @@ class WhisperCppVulkanBackend(TranscriptionBackend):
                     text = _read_exact(self._process.stdout, text_len).decode("utf-8", errors="replace")
                     error = _read_exact(self._process.stdout, error_len).decode("utf-8", errors="replace")
                     exchange_result["values"] = (status, confidence, duration_ms, detected, text, error)
+            except (BrokenPipeError, OSError) as exc:
+                if self._process.poll() is None:
+                    try:
+                        self._process.wait(timeout=1)
+                    except Exception:
+                        pass
+                exchange_result["error"] = self._worker_exit_error() if self._process.poll() is not None else exc
             except Exception as exc:
                 exchange_result["error"] = exc
         thread = Thread(target=exchange, daemon=True, name="WhisperCppExchange")

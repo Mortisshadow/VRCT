@@ -1,6 +1,6 @@
 # VRCT whisper.cpp worker
 
-This is a persistent, binary-protocol transcription worker. It fetches whisper.cpp v1.7.6 at pinned commit `a8d002cfd879315632a579e73f0148d06959de36` and enables GGML Vulkan. The Windows release helper places the executable in `src-tauri/bin/_internal/whisper_cpp` for PyInstaller collection.
+This is a persistent, binary-protocol transcription worker. It fetches whisper.cpp v1.9.3 at pinned commit `371b5a7561823ab2bb32142d2751e35e7534727b` and enables GGML Vulkan. The Windows release helper places the executable in `src-tauri/bin/_internal/whisper_cpp` for PyInstaller collection. VRCT uses greedy decoding and explicitly disables flash attention for broad Windows Vulkan driver compatibility.
 
 Build on Windows with CMake 3.20+, Visual Studio 2022, and the Vulkan SDK:
 

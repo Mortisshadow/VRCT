@@ -40,7 +40,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: native/whisper_cpp_worker/stage/whisper_cpp
-          key: windows-x64-whisper-vulkan-${{ hashFiles('native/whisper_cpp_worker/CMakeLists.txt', 'native/whisper_cpp_worker/main.cpp') }}
+          key: windows-x64-whisper-vulkan-${{ hashFiles('native/whisper_cpp_worker/CMakeLists.txt', 'native/whisper_cpp_worker/main.cpp', 'bat/build_whisper_worker.bat') }}
       - name: Restore cached CPU Python environment
         id: python-environment-cache
         uses: actions/cache@v4

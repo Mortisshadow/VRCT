@@ -179,7 +179,7 @@ npm run release-all
 
 ### whisper.cpp ネイティブワーカー
 
-配布版は、whisper.cpp v1.7.6（コミット `a8d002cfd879315632a579e73f0148d06959de36`）を GGML Vulkan 有効でビルドした
+配布版は、whisper.cpp v1.9.3（コミット `371b5a7561823ab2bb32142d2751e35e7534727b`）を GGML Vulkan 有効でビルドした
 `vrct-whisper-worker.exe` を使用します。Windows では Vulkan SDK と Visual Studio 2022
 が必要です。次のコマンドでビルドし、実行ファイルと DLL を PyInstaller 用 staging
 ディレクトリへコピーします:
