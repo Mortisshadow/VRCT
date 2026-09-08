@@ -11,7 +11,11 @@ from models.transcription.transcription_transcriber import (
     AudioTranscriber,
     GOOGLE_RECOGNIZE_TIMEOUT_SECONDS,
 )
-from models.transcription.transcription_backend import BackendResult, _registry
+from models.transcription.transcription_backend import (
+    BackendResult,
+    WHISPER_CPP_VULKAN_BACKEND,
+    _registry,
+)
 
 
 class FakeAudioSource:
@@ -54,6 +58,111 @@ class TestWhisperAudioConversion(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIsNone(calls[0]["language"])
         transcriber.close(); _registry.clear()
+
+    @patch("models.transcription.transcription_transcriber.checkWhisperWeight", return_value=True)
+    def test_faster_whisper_keeps_existing_cumulative_audio_and_detection(self, _):
+        calls = []
+        class Backend:
+            def transcribe(self, audio, **kwargs):
+                calls.append((len(audio), kwargs["language"]))
+                return BackendResult("hello", "en", .9)
+            def close(self): pass
+        transcriber = AudioTranscriber(False, FakeAudioSource(), 3, 10, "Whisper",
+                                       root=".", whisper_weight_type="m",
+                                       backend_factory=lambda: Backend())
+        now = datetime.now()
+        q = Queue(); q.put((np.ones(6000, dtype="<i2").tobytes(), now))
+        transcriber.transcribeAudioQueue(q, ["English", "German"], ["United States", "Germany"])
+        q.put((np.ones(6000, dtype="<i2").tobytes(), now + timedelta(seconds=1)))
+        transcriber.transcribeAudioQueue(q, ["English", "German"], ["United States", "Germany"])
+
+        self.assertEqual(calls, [(6000, None), (12000, None)])
+        shared = transcriber.whisper_backend
+        from models.transcription.transcription_backend import releaseBackend
+        releaseBackend(shared); _registry.clear()
+
+    @patch("models.transcription.transcription_transcriber.checkWhisperCppWeight", return_value=True)
+    def test_continuous_speech_decodes_only_new_audio_plus_small_overlap(self, _):
+        seen_lengths = []
+        class Backend:
+            def transcribe(self, audio, **kwargs):
+                seen_lengths.append(len(audio))
+                return BackendResult("hello", "en", .9)
+            def close(self): pass
+        transcriber = AudioTranscriber(False, FakeAudioSource(), 3, 10, "Whisper",
+                                       root=".", whisper_weight_type="m",
+                                       whisper_backend=WHISPER_CPP_VULKAN_BACKEND,
+                                       backend_factory=lambda: Backend())
+        now = datetime.now()
+        first = np.ones(6000, dtype="<i2").tobytes()
+        second = np.ones(6000, dtype="<i2").tobytes()
+        q = Queue(); q.put((first, now))
+        transcriber.transcribeAudioQueue(q, ["English"], ["United States"])
+        q.put((second, now + timedelta(seconds=1)))
+        transcriber.transcribeAudioQueue(q, ["English"], ["United States"])
+
+        self.assertEqual(seen_lengths, [6000, 10000])  # 6000 new + 4000 (250 ms) overlap
+        shared = transcriber.whisper_backend
+        from models.transcription.transcription_backend import releaseBackend
+        releaseBackend(shared); _registry.clear()
+
+    @patch("models.transcription.transcription_transcriber.checkWhisperCppWeight", return_value=True)
+    def test_streaming_chunks_merge_text_and_reuse_detected_language(self, _):
+        results = iter((
+            BackendResult("hello world", "en", .9),
+            BackendResult("world again", "en", .9),
+        ))
+        languages = []
+        class Backend:
+            def transcribe(self, audio, **kwargs):
+                languages.append(kwargs["language"])
+                return next(results)
+            def close(self): pass
+        transcriber = AudioTranscriber(False, FakeAudioSource(), 3, 10, "Whisper",
+                                       root=".", whisper_weight_type="m",
+                                       whisper_backend=WHISPER_CPP_VULKAN_BACKEND,
+                                       backend_factory=lambda: Backend())
+        now = datetime.now()
+        q = Queue(); q.put((np.ones(6000, dtype="<i2").tobytes(), now))
+        transcriber.transcribeAudioQueue(q, ["English", "Japanese"], ["United States", "Japan"])
+        self.assertEqual(transcriber.getTranscript()["text"], "hello world")
+        q.put((np.ones(6000, dtype="<i2").tobytes(), now + timedelta(seconds=1)))
+        transcriber.transcribeAudioQueue(q, ["English", "Japanese"], ["United States", "Japan"])
+
+        self.assertEqual(transcriber.getTranscript()["text"], "hello world again")
+        self.assertEqual(languages, [None, "en"])
+        shared = transcriber.whisper_backend
+        from models.transcription.transcription_backend import releaseBackend
+        releaseBackend(shared); _registry.clear()
+
+    @patch("models.transcription.transcription_transcriber.checkWhisperCppWeight", return_value=True)
+    def test_new_phrase_resets_overlap_text_and_detected_language(self, _):
+        results = iter((
+            BackendResult("old phrase", "en", .9),
+            BackendResult("new phrase", "de", .8),
+        ))
+        calls = []
+        class Backend:
+            def transcribe(self, audio, **kwargs):
+                calls.append((len(audio), kwargs["language"]))
+                return next(results)
+            def close(self): pass
+        transcriber = AudioTranscriber(False, FakeAudioSource(), 3, 10, "Whisper",
+                                       root=".", whisper_weight_type="m",
+                                       whisper_backend=WHISPER_CPP_VULKAN_BACKEND,
+                                       backend_factory=lambda: Backend())
+        now = datetime.now()
+        q = Queue(); q.put((np.ones(6000, dtype="<i2").tobytes(), now))
+        transcriber.transcribeAudioQueue(q, ["English", "German"], ["United States", "Germany"])
+        self.assertEqual(transcriber.getTranscript()["text"], "old phrase")
+        q.put((np.ones(2000, dtype="<i2").tobytes(), now + timedelta(seconds=4)))
+        transcriber.transcribeAudioQueue(q, ["English", "German"], ["United States", "Germany"])
+
+        self.assertEqual(transcriber.getTranscript()["text"], "new phrase")
+        self.assertEqual(calls, [(6000, None), (2000, None)])
+        shared = transcriber.whisper_backend
+        from models.transcription.transcription_backend import releaseBackend
+        releaseBackend(shared); _registry.clear()
 
 
 class TestAudioProcessingSelection(unittest.TestCase):

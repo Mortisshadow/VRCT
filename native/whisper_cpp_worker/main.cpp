@@ -137,6 +137,14 @@ int main(int argc, char **argv) {
         params.n_threads = threads; params.no_timestamps = true; params.temperature = 0.0f;
         params.language = language.empty() ? "auto" : language.c_str(); params.translate = false;
         params.no_speech_thold = no_speech; params.logprob_thold = avg_logprob; params.greedy.best_of = 1;
+        // Mic and speaker intentionally share the resident model/context. Do
+        // not leak decoder text history between independent audio streams;
+        // VRCT carries a small acoustic overlap and merges stable text itself.
+        params.no_context = true; params.max_tokens = 96; params.suppress_nst = false;
+        // Live chunks must have bounded latency. Retrying the same decode at
+        // increasing temperatures can multiply inference time on weak/noisy
+        // input; whisper.cpp's streaming example disables this fallback too.
+        params.temperature_inc = -1.0f;
         params.single_segment = false; params.print_progress = false; params.print_realtime = false; params.print_timestamps = false;
         int rc = whisper_full(ctx, params, pcm.data(), static_cast<int>(pcm.size()));
         double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
