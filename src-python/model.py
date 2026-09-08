@@ -13,7 +13,7 @@ from os import stat as os_stat
 from psutil import Process as psutil_Process
 from datetime import datetime
 from time import sleep
-from queue import Queue
+from queue import Empty, Queue
 from threading import Thread
 from requests import get as requests_get
 from typing import Callable, Optional, cast
@@ -26,7 +26,12 @@ from config import config
 
 from models.translation.translation_translator import Translator
 from models.osc.osc import OSCHandler
-from models.transcription.transcription_recorder import SelectedMicEnergyAndAudioRecorder, SelectedSpeakerEnergyAndAudioRecorder
+from models.transcription.transcription_recorder import (
+    SelectedMicEnergyAndAudioRecorder,
+    SelectedSpeakerEnergyAndAudioRecorder,
+    SelectedMicVadRecorder,
+    SelectedSpeakerVadRecorder,
+)
 from models.transcription.transcription_transcriber import AudioTranscriber
 from models.translation.translation_languages import translation_lang
 from models.transcription.transcription_languages import transcription_lang
@@ -49,6 +54,7 @@ from models.telemetry import Telemetry
 from utils import errorLogging, setupLogger, printLog
 
 TRANSCRIPT_STOP_JOIN_TIMEOUT = 15
+_AUDIO_QUEUE_MAXSIZE = 20
 
 # フリーズ調査用の恒久計装。mainloop.py の faulthandler.enable() は
 # ネイティブフォルト (access violation 等) 発生時にしか全スレッドの
@@ -283,8 +289,11 @@ class _AudioDeviceSession:
 
     def resume(self) -> None:
         if isinstance(self._audio_queue, Queue):
-            while not self._audio_queue.empty():
-                self._audio_queue.get()
+            while True:
+                try:
+                    self._audio_queue.get_nowait()
+                except Empty:
+                    break
         if self._recorder is not None:
             self._recorder.resume()
 
@@ -313,8 +322,8 @@ class _AudioDeviceSession:
 
         self._recorder = self._create_recorder(device)
 
-        audio_queue = Queue() if "transcript" in self.features else _DiscardQueue()
-        energy_queue: Optional[Queue] = Queue() if "energy" in self.features else None
+        audio_queue = Queue(maxsize=_AUDIO_QUEUE_MAXSIZE) if "transcript" in self.features else _DiscardQueue()
+        energy_queue: Optional[Queue] = Queue(maxsize=1) if "energy" in self.features else None
         self._audio_queue = audio_queue
         self._recorder.recordIntoQueue(audio_queue, energy_queue)
 
@@ -415,6 +424,8 @@ class MicSession(_AudioDeviceSession):
         phrase_timeout = config.MIC_PHRASE_TIMEOUT
         if record_timeout > phrase_timeout:
             record_timeout = phrase_timeout
+        if config.MIC_ENABLE_VAD is True:
+            return SelectedMicVadRecorder(device=device, record_timeout=record_timeout)
         return SelectedMicEnergyAndAudioRecorder(
             device=device,
             energy_threshold=config.MIC_THRESHOLD,
@@ -437,6 +448,7 @@ class MicSession(_AudioDeviceSession):
             device_index=config.SELECTED_TRANSCRIPTION_COMPUTE_DEVICE["device_index"],
             compute_type=config.SELECTED_TRANSCRIPTION_COMPUTE_TYPE,
             whisper_backend=config.SELECTED_WHISPER_BACKEND,
+            vad_segmented=config.MIC_ENABLE_VAD is True,
         )
 
     def _transcribe(self, transcriber: AudioTranscriber, queue: Queue) -> bool:
@@ -473,6 +485,8 @@ class SpeakerSession(_AudioDeviceSession):
         phrase_timeout = config.SPEAKER_PHRASE_TIMEOUT
         if record_timeout > phrase_timeout:
             record_timeout = phrase_timeout
+        if config.SPEAKER_ENABLE_VAD is True:
+            return SelectedSpeakerVadRecorder(device=device, record_timeout=record_timeout)
         return SelectedSpeakerEnergyAndAudioRecorder(
             device=device,
             energy_threshold=config.SPEAKER_THRESHOLD,
@@ -495,6 +509,7 @@ class SpeakerSession(_AudioDeviceSession):
             device_index=config.SELECTED_TRANSCRIPTION_COMPUTE_DEVICE["device_index"],
             compute_type=config.SELECTED_TRANSCRIPTION_COMPUTE_TYPE,
             whisper_backend=config.SELECTED_WHISPER_BACKEND,
+            vad_segmented=config.SPEAKER_ENABLE_VAD is True,
         )
 
     def _transcribe(self, transcriber: AudioTranscriber, queue: Queue) -> bool:

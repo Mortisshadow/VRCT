@@ -200,6 +200,13 @@ whisper.cpp では `ggml-large-v3-turbo-q8_0.bin` に対応し、CTranslate2 の
 `large-v3-turbo` は非量子化 GGML 版です。モデルは
 `weights/whisper_cpp/<model>/` に別キャッシュされます。
 
+マイク/スピーカーの `VAD Filter` は既定では無効です。有効にすると、同梱済みの
+faster-whisper Silero ONNX モデルが音声を 16 kHz mono に正規化し、発話前 256 ms と
+発話後約 768 ms を保持した確定セグメントだけを認識へ渡します。連続発話は約8秒で
+安全分割され、whisper.cpp 側ではモデルを再ロードせず250 msの境界オーバーラップと
+テキスト結合で継続します。静かな声を取りこぼす環境では、このオプションを無効に
+して従来のエネルギー閾値方式を使用してください。
+
 同じ音声をモデルを保持したまま繰り返し測定する例:
 
 ```bat

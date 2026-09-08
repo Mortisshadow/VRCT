@@ -164,6 +164,39 @@ class TestWhisperAudioConversion(unittest.TestCase):
         from models.transcription.transcription_backend import releaseBackend
         releaseBackend(shared); _registry.clear()
 
+    @patch("models.transcription.transcription_transcriber.checkWhisperCppWeight", return_value=True)
+    def test_vad_max_duration_continues_phrase_without_reloading_backend(self, _):
+        results = iter((
+            BackendResult("a long sentence", "en", .9),
+            BackendResult("sentence continues", "en", .9),
+        ))
+        calls = []
+        class Backend:
+            def transcribe(self, audio, **kwargs):
+                calls.append((len(audio), kwargs["language"]))
+                return next(results)
+            def close(self): pass
+        transcriber = AudioTranscriber(
+            False, FakeAudioSource(), 3, 10, "Whisper", root=".",
+            whisper_weight_type="m", whisper_backend=WHISPER_CPP_VULKAN_BACKEND,
+            backend_factory=lambda: Backend(), vad_segmented=True,
+        )
+        now = datetime.now()
+        first = np.ones(6000, dtype="<i2").tobytes()
+        second = np.ones(6000, dtype="<i2").tobytes()
+        q = Queue(); q.put((first, now, "max_duration"))
+        transcriber.transcribeAudioQueue(q, ["English", "German"], ["United States", "Germany"])
+        self.assertEqual(transcriber.getTranscript()["text"], "a long sentence")
+        q.put((second, now + timedelta(seconds=15), "silence"))
+        transcriber.transcribeAudioQueue(q, ["English", "German"], ["United States", "Germany"])
+
+        self.assertEqual(transcriber.getTranscript()["text"], "a long sentence continues")
+        self.assertEqual(calls, [(6000, None), (10000, "en")])
+        self.assertEqual(len(_registry), 1)
+        shared = transcriber.whisper_backend
+        from models.transcription.transcription_backend import releaseBackend
+        releaseBackend(shared); _registry.clear()
+
 
 class TestAudioProcessingSelection(unittest.TestCase):
     @patch("models.transcription.transcription_transcriber.checkWhisperWeight", return_value=False)

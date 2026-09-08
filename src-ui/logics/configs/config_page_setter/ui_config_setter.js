@@ -523,6 +523,22 @@ export const SETTINGS_ARRAY = [
         logics_template_id: "get_set",
         base_endpoint_name: "speaker_max_phrases",
     },
+    {
+        Category: "Transcription",
+        Base_Name: "MicVadFilter",
+        default_value: false,
+        ui_template_id: "toggle",
+        logics_template_id: "toggle_enable_disable",
+        base_endpoint_name: "mic_vad_filter",
+    },
+    {
+        Category: "Transcription",
+        Base_Name: "SpeakerVadFilter",
+        default_value: false,
+        ui_template_id: "toggle",
+        logics_template_id: "toggle_enable_disable",
+        base_endpoint_name: "speaker_vad_filter",
+    },
     // Engines
     {
         Category: "Transcription",

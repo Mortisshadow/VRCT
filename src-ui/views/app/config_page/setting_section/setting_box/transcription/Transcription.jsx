@@ -41,8 +41,22 @@ const Mic_Container = () => {
             <MicRecordTimeout_Box />
             <MicPhraseTimeout_Box />
             <MicMaxWords_Box />
+            <MicVadFilter_Box />
             <MicWordFilter_Box />
         </div>
+    );
+};
+
+const MicVadFilter_Box = () => {
+    const { t } = useI18n();
+    const { currentMicVadFilter, toggleMicVadFilter } = useTranscription();
+    return (
+        <CheckboxContainer
+            label={t("config_page.transcription.mic_vad_filter.label")}
+            desc={t("config_page.transcription.mic_vad_filter.desc")}
+            variable={currentMicVadFilter}
+            toggleFunction={toggleMicVadFilter}
+        />
     );
 };
 
@@ -129,7 +143,21 @@ const Speaker_Container = () => {
             <SpeakerRecordTimeout_Box />
             <SpeakerPhraseTimeout_Box />
             <SpeakerMaxWords_Box />
+            <SpeakerVadFilter_Box />
         </div>
+    );
+};
+
+const SpeakerVadFilter_Box = () => {
+    const { t } = useI18n();
+    const { currentSpeakerVadFilter, toggleSpeakerVadFilter } = useTranscription();
+    return (
+        <CheckboxContainer
+            label={t("config_page.transcription.speaker_vad_filter.label")}
+            desc={t("config_page.transcription.speaker_vad_filter.desc")}
+            variable={currentSpeakerVadFilter}
+            toggleFunction={toggleSpeakerVadFilter}
+        />
     );
 };
 

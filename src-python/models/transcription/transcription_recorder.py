@@ -4,15 +4,15 @@ These classes provide small adapters that push raw audio bytes into queues.
 They intentionally keep a thin API so the rest of the system can mock them
 in tests.
 
-デバイスライフサイクル整理と VAD ストリーミング撤退 (ADR-0004) の結果、
-現在の設計は以下の通り:
+デバイスライフサイクル整理後の現在の設計は以下の通り:
 
-- `BaseEnergyAndAudioRecorder` が mic/speaker 共通の唯一の Recorder として、
+- `BaseEnergyAndAudioRecorder` が既定の Recorder として、
   音声データ (audio_queue) とエネルギー (energy_queue) の両方を同時に扱う。
   同一物理デバイスに対する PyAudio Microphone インスタンスは常に 1 つ。
-- 発話区間検出・フレーズ境界・pause/resume/stop は `speech_recognition` の
+- 既定では発話区間検出・フレーズ境界・pause/resume/stop は `speech_recognition` の
   `listen_energy_and_audio_in_background` に完全に委任する (energy_threshold,
-  phrase_time_limit)。独自 VAD/ストリーミング分割は行わない (ADR-0004 参照)。
+  phrase_time_limit) に委任する。明示的に VAD Filter を有効化した場合だけ
+  `BaseVadAndAudioRecorder` と Silero ONNX による確定セグメントを使用する。
   `callback_energy` フックにより、フレーズ確定を待たず生チャンクごとに
   エナジー値を取得できる (音量メーターのリアルタイム更新用)。
 - PyAudio 操作は全て `pyaudio_op_lock` の下で行い、WASAPI ロック競合を防ぐ。
@@ -22,8 +22,9 @@ import threading
 from typing import Any
 from speech_recognition import AudioSource, Recognizer, Microphone
 from datetime import datetime
-from utils import errorLogging, printLog
+from utils import errorLogging, printLog, putDroppingOldestOnFull
 from device_manager import pyaudio_op_lock
+from models.transcription.audio_vad import VadRecognizerAdapter
 
 # 直前に同じ物理デバイスを force-stop した直後は、WASAPI 側の解放が
 # 完了しておらず Microphone.__enter__ 内の PyAudio.open() がブロックし
@@ -202,7 +203,8 @@ class BaseEnergyAndAudioRecorder:
         def audio_callback(_, audio) -> None:
             try:
                 raw = audio.get_raw_data()
-                audio_queue.put((raw, datetime.now()))
+                if putDroppingOldestOnFull(audio_queue, (raw, datetime.now())):
+                    printLog("audio_queue is full; dropped the oldest queued chunk to keep up")
             except Exception:
                 # listener スレッドを絶対に殺さない (再入時に stream が
                 # 停止するのを避けるため)
@@ -210,7 +212,7 @@ class BaseEnergyAndAudioRecorder:
 
         def energy_callback(energy) -> None:
             try:
-                energy_queue.put(energy)
+                putDroppingOldestOnFull(energy_queue, energy)
             except Exception:
                 errorLogging()
 
@@ -309,3 +311,106 @@ class SelectedSpeakerEnergyAndAudioRecorder(BaseEnergyAndAudioRecorder):
             phrase_time_limit=phrase_time_limit,
             record_timeout=record_timeout,
         )
+
+
+class BaseVadAndAudioRecorder:
+    """Recorder using optional Silero VAD instead of an energy threshold."""
+
+    def __init__(self, source: Any, record_timeout: int, label: str) -> None:
+        if source is None:
+            raise ValueError("audio source can't be None")
+        self.recorder = Recognizer()
+        self.source = source
+        self.record_timeout = record_timeout
+        self.stop = None
+        self.pause = None
+        self.resume = None
+        self.device_error_event = threading.Event()
+        self.vad_adapter = VadRecognizerAdapter(
+            source.SAMPLE_RATE, source.SAMPLE_WIDTH, getattr(source, "channels", 1)
+        )
+        self.vad_adapter.segmenter.diagnostic_callback = printLog
+        self.vad_adapter.segmenter.diagnostic_label = label
+        self.SAMPLE_RATE = self.vad_adapter.sample_rate
+        self.SAMPLE_WIDTH = self.vad_adapter.sample_width
+        self.channels = 1
+
+    def adjustForNoise(self) -> None:
+        pass
+
+    def recordIntoQueue(self, audio_queue: Any, energy_queue: Any = None) -> None:
+        def audio_callback(_, audio) -> None:
+            try:
+                item = (
+                    audio.get_raw_data(),
+                    datetime.now(),
+                    getattr(audio, "segment_reason", None) or "silence",
+                )
+                if putDroppingOldestOnFull(audio_queue, item):
+                    printLog("audio_queue is full; dropped the oldest queued VAD segment")
+            except Exception:
+                errorLogging()
+
+        def energy_callback(energy) -> None:
+            try:
+                putDroppingOldestOnFull(energy_queue, energy)
+            except Exception:
+                errorLogging()
+
+        try:
+            stop, pause, resume = self.recorder.listen_with_segmenter_in_background(
+                source=self.source,
+                callback=audio_callback,
+                segmenter=self.vad_adapter,
+                callback_energy=energy_callback if energy_queue is not None else None,
+                record_timeout=self.record_timeout,
+            )
+        except Exception:
+            self.device_error_event.set()
+            errorLogging()
+            raise
+
+        def stopper(wait_for_stop: bool = True) -> None:
+            try:
+                with pyaudio_op_lock:
+                    stream = getattr(getattr(self.source, "stream", None), "pyaudio_stream", None)
+                    if stream is not None and not stream.is_stopped():
+                        stream.stop_stream()
+            except Exception:
+                errorLogging()
+            stop(wait_for_stop=wait_for_stop)
+
+        def pauser() -> None:
+            pause()
+
+        def resumer() -> None:
+            # Do not join audio retained before a mute/pause to a later phrase.
+            # The owning session drains already completed queue items.
+            self.vad_adapter.reset()
+            resume()
+
+        self.stop = stopper
+        self.pause = pauser
+        self.resume = resumer
+
+
+class SelectedMicVadRecorder(BaseVadAndAudioRecorder):
+    def __init__(self, device: dict, record_timeout: int = 5) -> None:
+        source = _create_microphone(
+            {},
+            device_index=int(device.get("index", -1)),
+            sample_rate=int(device.get("defaultSampleRate", 16000)),
+        )
+        super().__init__(source, record_timeout, "mic")
+
+
+class SelectedSpeakerVadRecorder(BaseVadAndAudioRecorder):
+    def __init__(self, device: dict, record_timeout: int = 5) -> None:
+        source = _create_microphone(
+            {"speaker": True},
+            speaker=True,
+            device_index=int(device.get("index", -1)),
+            sample_rate=int(device.get("defaultSampleRate", 16000)),
+            channels=int(device.get("maxInputChannels", 1)),
+        )
+        super().__init__(source, record_timeout, "speaker")

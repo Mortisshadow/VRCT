@@ -348,6 +348,9 @@ mapping = {
     "/get/data/mic_automatic_threshold": {"status": True, "variable":controller.getMicAutomaticThreshold},
     "/set/enable/mic_automatic_threshold": {"status": True, "variable":controller.setEnableMicAutomaticThreshold},
     "/set/disable/mic_automatic_threshold": {"status": True, "variable":controller.setDisableMicAutomaticThreshold},
+    "/get/data/mic_vad_filter": {"status": True, "variable":controller.getMicVadFilter},
+    "/set/enable/mic_vad_filter": {"status": True, "variable":controller.setEnableMicVadFilter},
+    "/set/disable/mic_vad_filter": {"status": True, "variable":controller.setDisableMicVadFilter},
 
     "/get/data/mic_record_timeout": {"status": True, "variable":controller.getMicRecordTimeout},
     "/set/data/mic_record_timeout": {"status": True, "variable":controller.setMicRecordTimeout},
@@ -390,6 +393,9 @@ mapping = {
     "/get/data/speaker_automatic_threshold": {"status": True, "variable":controller.getSpeakerAutomaticThreshold},
     "/set/enable/speaker_automatic_threshold": {"status": True, "variable":controller.setEnableSpeakerAutomaticThreshold},
     "/set/disable/speaker_automatic_threshold": {"status": True, "variable":controller.setDisableSpeakerAutomaticThreshold},
+    "/get/data/speaker_vad_filter": {"status": True, "variable":controller.getSpeakerVadFilter},
+    "/set/enable/speaker_vad_filter": {"status": True, "variable":controller.setEnableSpeakerVadFilter},
+    "/set/disable/speaker_vad_filter": {"status": True, "variable":controller.setDisableSpeakerVadFilter},
 
     "/get/data/speaker_record_timeout": {"status": True, "variable":controller.getSpeakerRecordTimeout},
     "/set/data/speaker_record_timeout": {"status": True, "variable":controller.setSpeakerRecordTimeout},

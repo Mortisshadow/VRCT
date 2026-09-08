@@ -6,6 +6,7 @@ import sys
 import traceback
 import logging
 import threading
+import queue
 from logging.handlers import RotatingFileHandler
 
 import requests
@@ -36,6 +37,23 @@ _WEIGHT_VERIFIED_MARKER_NAME = ".weight_verified.json"
 # パイプ相手に) 出力が混ざったり、OSError (Errno 22, Invalid argument)
 # を招くことがある。1 プロセス内で書き込みを直列化する。
 _stdout_write_lock = threading.Lock()
+
+
+def putDroppingOldestOnFull(q: "queue.Queue", item: Any) -> bool:
+    """Enqueue without blocking, preferring current real-time data on overflow."""
+    try:
+        q.put_nowait(item)
+        return False
+    except queue.Full:
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            q.put_nowait(item)
+        except queue.Full:
+            pass
+        return True
 
 
 def _writeStdoutLine(line: str) -> None:

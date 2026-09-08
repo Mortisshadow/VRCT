@@ -3,14 +3,16 @@
 This class focuses on converting incoming raw audio buffers into text using
 either the Google web recognizer (online) or a local Whisper model (offline).
 
-VAD ストリーミング撤退 (ADR-0004) 以降、キューには
-(raw_bytes, recorded_at) タプルだけが積まれる。フレーズ境界は
+通常はキューへ (raw_bytes, recorded_at) が積まれ、フレーズ境界は
 `speech_recognition.listen_energy_and_audio_in_background` の phrase_time_limit と
 AudioTranscriber.updateLastSampleAndPhraseStatus の phrase_timeout で決まる。
+任意の VAD Filter 使用時は (raw_bytes, recorded_at, end_reason) を受け取り、
+最大時間で分割された連続発話だけを同じ論理フレーズとして結合する。
 partial (発話中の暫定結果) 通知は行わない。
 """
 
 import time
+import logging
 from io import BytesIO
 from queue import Empty
 from threading import Event, Lock
@@ -47,6 +49,8 @@ GOOGLE_RECOGNIZE_TIMEOUT_SECONDS = 10
 WHISPER_STREAM_OVERLAP_SECONDS = 0.25
 WHISPER_PHRASE_BOUNDARY_TOLERANCE_SECONDS = 0.25
 
+logger = logging.getLogger("vrct.transcription")
+
 
 class AudioTranscriber:
     """Convert queued audio buffers into transcripts.
@@ -71,6 +75,7 @@ class AudioTranscriber:
         compute_type: str = "auto",
         whisper_backend: str = FASTER_WHISPER_BACKEND,
         backend_factory=None,
+        vad_segmented: bool = False,
     ) -> None:
         self.speaker = speaker
         self.phrase_timeout = phrase_timeout
@@ -85,6 +90,8 @@ class AudioTranscriber:
         self.whisper_backend = None
         self._close_lock = Lock()
         self.whisper_weight_type = whisper_weight_type
+        self.vad_segmented = vad_segmented
+        self._vad_continuation = False
         self._whisper_audio_overlap = bytearray()
         self._whisper_phrase_text = ""
         self._whisper_phrase_language: Optional[str] = None
@@ -120,24 +127,42 @@ class AudioTranscriber:
         no_repeat_ngram_size: int = 0,
     ) -> bool:
         try:
-            audio, time_spoken = audio_queue.get_nowait()
+            item = audio_queue.get_nowait()
         except Empty:
             time.sleep(0.01)
             return False
+        if self.vad_segmented:
+            audio, time_spoken, reason = item
+            continuing = self._vad_continuation
+            if not continuing:
+                self._resetWhisperPhraseState()
+            self.audio_sources["last_sample"] = (
+                bytearray(self._whisper_audio_overlap)
+                if continuing and self._usesWhisperCppStreaming()
+                else bytearray()
+            )
+            self.audio_sources["last_sample"].extend(audio)
+            self.audio_sources["last_spoken"] = time_spoken
+            self.audio_sources["new_phrase"] = not continuing
+            self._vad_continuation = reason == "max_duration"
+        else:
+            audio, time_spoken = item
         # Only decode audio which has not been processed before. A small raw
         # overlap protects words crossing a callback boundary without making
         # continuous speech grow into an ever more expensive 30-second input.
-        if self._usesWhisperCppStreaming():
-            self.audio_sources["last_sample"] = bytearray(self._whisper_audio_overlap)
-        self.audio_sources["new_phrase"] = False
-        # まとめて drain して最新まで反映する (backlog を残さない)
-        self.updateLastSampleAndPhraseStatus(audio, time_spoken)
-        while True:
-            try:
-                audio, time_spoken = audio_queue.get_nowait()
-            except Empty:
-                break
+        if not self.vad_segmented:
+            if self._usesWhisperCppStreaming():
+                self.audio_sources["last_sample"] = bytearray(self._whisper_audio_overlap)
+            self.audio_sources["new_phrase"] = False
+            # まとめて drain して最新まで反映する (backlog を残さない)
             self.updateLastSampleAndPhraseStatus(audio, time_spoken)
+            while True:
+                try:
+                    audio, time_spoken = audio_queue.get_nowait()
+                except Empty:
+                    break
+                self.updateLastSampleAndPhraseStatus(audio, time_spoken)
+        self._capWhisperCppInput()
 
         confidences: List[Dict[str, Any]] = [{"confidence": 0, "text": "", "language": None}]
         try:
@@ -177,7 +202,7 @@ class AudioTranscriber:
                             if len(language_country_pairs) == 1
                             else (
                                 self._whisper_phrase_language
-                                if self._usesWhisperCppStreaming()
+                                if self._usesWhisperCppStreaming() or self.vad_segmented
                                 else None
                             )
                         )
@@ -205,9 +230,9 @@ class AudioTranscriber:
                             detected_language = info.language
                             confidence = info.language_probability
                         self.last_recognition_error = False
-                        if detected_language and self._usesWhisperCppStreaming():
+                        if detected_language and (self._usesWhisperCppStreaming() or self.vad_segmented):
                             self._whisper_phrase_language = detected_language
-                        if self._usesWhisperCppStreaming():
+                        if self._usesWhisperCppStreaming() or self.vad_segmented:
                             text = self._mergeWhisperPhraseText(text)
                         selected_language = next(
                             (candidate_language for candidate_language, candidate_country in language_country_pairs
@@ -262,6 +287,24 @@ class AudioTranscriber:
             and status is not None
             and status.backend == WHISPER_CPP_VULKAN_BACKEND
         )
+
+    def _resetWhisperPhraseState(self) -> None:
+        self._whisper_audio_overlap = bytearray()
+        self._whisper_phrase_text = ""
+        self._whisper_phrase_language = None
+
+    def _capWhisperCppInput(self) -> None:
+        if not self._usesWhisperCppStreaming():
+            return
+        source_info = self.audio_sources
+        frame_size = int(source_info["sample_width"]) * max(1, int(source_info["channels"]))
+        max_bytes = int(source_info["sample_rate"]) * frame_size * 15
+        if max_bytes > 0 and len(source_info["last_sample"]) > max_bytes:
+            dropped = len(source_info["last_sample"]) - max_bytes
+            source_info["last_sample"] = source_info["last_sample"][-max_bytes:]
+            logger.warning(
+                "Whisper.cpp input backlog capped at 15 seconds; dropped_bytes=%d", dropped
+            )
 
     def _updateWhisperAudioOverlap(self) -> None:
         source_info = self.audio_sources
@@ -351,6 +394,7 @@ class AudioTranscriber:
         self._whisper_audio_overlap = bytearray()
         self._whisper_phrase_text = ""
         self._whisper_phrase_language = None
+        self._vad_continuation = False
 
     def close(self) -> None:
         with self._close_lock:

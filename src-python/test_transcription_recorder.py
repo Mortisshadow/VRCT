@@ -23,6 +23,7 @@ from speech_recognition import AudioSource
 
 from models.transcription.transcription_recorder import (
     BaseEnergyAndAudioRecorder,
+    BaseVadAndAudioRecorder,
     _create_microphone,
     _LockedAudioSource,
     SelectedMicEnergyAndAudioRecorder,
@@ -241,7 +242,7 @@ class TestRecorderChunkSize(unittest.TestCase):
         self.assertNotIn("chunk_size", speaker_kwargs)
 
 
-class TestRecorderPipeline(unittest.TestCase):
+class TestRecorderFormat(unittest.TestCase):
     def test_exposes_source_sample_format(self) -> None:
         recorder = BaseEnergyAndAudioRecorder(
             RecorderAudioSource(),
@@ -254,6 +255,54 @@ class TestRecorderPipeline(unittest.TestCase):
         self.assertEqual(recorder.SAMPLE_RATE, 48000)
         self.assertEqual(recorder.SAMPLE_WIDTH, 2)
         self.assertEqual(recorder.channels, 2)
+
+
+class TestRecorderPipeline(unittest.TestCase):
+    def test_wires_segmenter_and_resets_it_on_resume(self) -> None:
+        recorder = BaseVadAndAudioRecorder(RecorderAudioSource(), record_timeout=5, label="mic")
+        stop = MagicMock(name="stop")
+        pause = MagicMock(name="pause")
+        resume = MagicMock(name="resume")
+        recorder.recorder = MagicMock()
+        recorder.recorder.listen_with_segmenter_in_background.return_value = (
+            stop,
+            pause,
+            resume,
+        )
+        recorder.vad_adapter.reset = MagicMock()
+
+        recorder.recordIntoQueue(Queue())
+        recorder.pause()
+        recorder.resume()
+
+        _, kwargs = recorder.recorder.listen_with_segmenter_in_background.call_args
+        self.assertIs(kwargs["segmenter"], recorder.vad_adapter)
+        self.assertEqual(kwargs["record_timeout"], 5)
+        pause.assert_called_once()
+        recorder.vad_adapter.reset.assert_called_once()
+        resume.assert_called_once()
+
+    def test_callback_preserves_segment_end_reason(self) -> None:
+        recorder = BaseVadAndAudioRecorder(RecorderAudioSource(), record_timeout=5, label="mic")
+        captured = {}
+
+        def fake_listen(**kwargs):
+            captured.update(kwargs)
+            return MagicMock(), MagicMock(), MagicMock()
+
+        recorder.recorder = MagicMock()
+        recorder.recorder.listen_with_segmenter_in_background.side_effect = fake_listen
+        audio_queue = Queue()
+        recorder.recordIntoQueue(audio_queue)
+
+        audio = MagicMock()
+        audio.get_raw_data.return_value = b"\x01\x00"
+        audio.segment_reason = "max_duration"
+        captured["callback"](None, audio)
+
+        raw, _recorded_at, reason = audio_queue.get_nowait()
+        self.assertEqual(raw, b"\x01\x00")
+        self.assertEqual(reason, "max_duration")
 
     def test_recordIntoQueue_wires_listen_energy_and_audio_in_background_control_handles(
         self,

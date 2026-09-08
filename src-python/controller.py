@@ -1439,6 +1439,20 @@ class Controller:
         return {"status":200, "result":config.MIC_AUTOMATIC_THRESHOLD}
 
     @staticmethod
+    def getMicVadFilter(*args, **kwargs) -> dict:
+        return {"status": 200, "result": config.MIC_ENABLE_VAD}
+
+    def setEnableMicVadFilter(self, *args, **kwargs) -> dict:
+        config.MIC_ENABLE_VAD = True
+        model.reloadTranscriptionSessions()
+        return {"status": 200, "result": config.MIC_ENABLE_VAD}
+
+    def setDisableMicVadFilter(self, *args, **kwargs) -> dict:
+        config.MIC_ENABLE_VAD = False
+        model.reloadTranscriptionSessions()
+        return {"status": 200, "result": config.MIC_ENABLE_VAD}
+
+    @staticmethod
     def getMicRecordTimeout(*args, **kwargs) -> dict:
         return {"status":200, "result":config.MIC_RECORD_TIMEOUT}
 
@@ -1644,6 +1658,20 @@ class Controller:
         if config.SPEAKER_AUTOMATIC_THRESHOLD is True:
             config.SPEAKER_AUTOMATIC_THRESHOLD = False
         return {"status":200, "result":config.SPEAKER_AUTOMATIC_THRESHOLD}
+
+    @staticmethod
+    def getSpeakerVadFilter(*args, **kwargs) -> dict:
+        return {"status": 200, "result": config.SPEAKER_ENABLE_VAD}
+
+    def setEnableSpeakerVadFilter(self, *args, **kwargs) -> dict:
+        config.SPEAKER_ENABLE_VAD = True
+        model.reloadTranscriptionSessions()
+        return {"status": 200, "result": config.SPEAKER_ENABLE_VAD}
+
+    def setDisableSpeakerVadFilter(self, *args, **kwargs) -> dict:
+        config.SPEAKER_ENABLE_VAD = False
+        model.reloadTranscriptionSessions()
+        return {"status": 200, "result": config.SPEAKER_ENABLE_VAD}
 
     @staticmethod
     def getSpeakerRecordTimeout(*args, **kwargs) -> dict:
