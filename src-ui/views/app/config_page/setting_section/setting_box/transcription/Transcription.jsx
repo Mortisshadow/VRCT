@@ -13,6 +13,7 @@ import {
     DropdownMenuContainer,
     SliderContainer,
     SwitchBoxContainer,
+    CheckboxContainer,
 } from "../_templates/Templates";
 
 import {
