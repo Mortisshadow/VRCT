@@ -48,6 +48,7 @@ MAX_PHRASES = 10
 GOOGLE_RECOGNIZE_TIMEOUT_SECONDS = 10
 WHISPER_STREAM_OVERLAP_SECONDS = 0.25
 WHISPER_PHRASE_BOUNDARY_TOLERANCE_SECONDS = 0.25
+WHISPER_FORCED_CHUNK_TOLERANCE_SECONDS = 0.25
 
 logger = logging.getLogger("vrct.transcription")
 
@@ -95,6 +96,7 @@ class AudioTranscriber:
         self._whisper_audio_overlap = bytearray()
         self._whisper_phrase_text = ""
         self._whisper_phrase_language: Optional[str] = None
+        self._whisper_energy_continuation = False
         self.audio_sources: Dict[str, Any] = {
             "sample_rate": source.SAMPLE_RATE,
             "sample_width": source.SAMPLE_WIDTH,
@@ -102,6 +104,7 @@ class AudioTranscriber:
             "last_sample": bytearray(),
             "last_spoken": None,
             "new_phrase": True,
+            "chunk_time_limit": getattr(source, "phrase_time_limit", phrase_timeout),
             "process_data_func": self.processSpeakerData if speaker else self.processMicData,
         }
 
@@ -152,16 +155,20 @@ class AudioTranscriber:
         # continuous speech grow into an ever more expensive 30-second input.
         if not self.vad_segmented:
             if self._usesWhisperCppStreaming():
-                self.audio_sources["last_sample"] = bytearray(self._whisper_audio_overlap)
-            self.audio_sources["new_phrase"] = False
+                self._updateWhisperCppEnergySample(audio, time_spoken)
+            else:
+                self.audio_sources["new_phrase"] = False
+                self.updateLastSampleAndPhraseStatus(audio, time_spoken)
             # まとめて drain して最新まで反映する (backlog を残さない)
-            self.updateLastSampleAndPhraseStatus(audio, time_spoken)
             while True:
                 try:
                     audio, time_spoken = audio_queue.get_nowait()
                 except Empty:
                     break
-                self.updateLastSampleAndPhraseStatus(audio, time_spoken)
+                if self._usesWhisperCppStreaming():
+                    self._updateWhisperCppEnergySample(audio, time_spoken, append_to_current=True)
+                else:
+                    self.updateLastSampleAndPhraseStatus(audio, time_spoken)
         self._capWhisperCppInput()
 
         confidences: List[Dict[str, Any]] = [{"confidence": 0, "text": "", "language": None}]
@@ -250,7 +257,10 @@ class AudioTranscriber:
 
         if self._usesWhisperCppStreaming():
             self._updateWhisperAudioOverlap()
-        result = max(confidences, key=lambda x: x["confidence"])
+        # A native backend can return useful text with confidence 0.0. Do not
+        # let the empty sentinel win a tie and silently discard that result.
+        text_results = [candidate for candidate in confidences if candidate["text"].strip()]
+        result = max(text_results or confidences, key=lambda x: x["confidence"])
         if result["text"] != "":
             self.updateTranscript(result)
         return True
@@ -279,6 +289,60 @@ class AudioTranscriber:
 
         source_info["last_sample"].extend(data)
         source_info["last_spoken"] = time_spoken
+
+    def _updateWhisperCppEnergySample(
+        self, data: bytes, time_spoken, *, append_to_current: bool = False
+    ) -> None:
+        """Append one energy-recorder callback without joining separate replies.
+
+        SpeechRecognition does not expose whether a callback ended naturally or
+        at ``phrase_time_limit``. A near-limit block followed immediately by
+        another block is continuous speech; a shorter block, or an actual time
+        gap, is a completed phrase. Callback end timestamps alone cannot make
+        this distinction and previously joined normal question/answer turns.
+        """
+        source_info = self.audio_sources
+        bytes_per_second = (
+            int(source_info["sample_rate"])
+            * int(source_info["sample_width"])
+            * max(1, int(source_info["channels"]))
+        )
+        duration_seconds = len(data) / bytes_per_second if bytes_per_second > 0 else 0.0
+        estimated_start = time_spoken - timedelta(seconds=duration_seconds)
+        previous_end = source_info["last_spoken"]
+        gap_seconds = (
+            (estimated_start - previous_end).total_seconds()
+            if previous_end is not None else None
+        )
+        continuing = (
+            self._whisper_energy_continuation
+            and gap_seconds is not None
+            and gap_seconds <= WHISPER_PHRASE_BOUNDARY_TOLERANCE_SECONDS
+        )
+        if not continuing:
+            source_info["last_sample"] = bytearray()
+            self._resetWhisperPhraseState()
+        elif not append_to_current:
+            source_info["last_sample"] = bytearray(self._whisper_audio_overlap)
+
+        source_info["new_phrase"] = not continuing
+        source_info["last_sample"].extend(data)
+        source_info["last_spoken"] = time_spoken
+
+        chunk_limit = max(0.0, float(source_info["chunk_time_limit"]))
+        forced_threshold = max(
+            0.1, chunk_limit - WHISPER_FORCED_CHUNK_TOLERANCE_SECONDS
+        )
+        self._whisper_energy_continuation = (
+            chunk_limit > 0.0 and duration_seconds >= forced_threshold
+        )
+        logger.info(
+            "Whisper.cpp phrase boundary new_phrase=%s duration_ms=%.1f gap_ms=%s forced=%s",
+            source_info["new_phrase"],
+            duration_seconds * 1000.0,
+            "none" if gap_seconds is None else f"{gap_seconds * 1000.0:.1f}",
+            self._whisper_energy_continuation,
+        )
 
     def _usesWhisperCppStreaming(self) -> bool:
         status = getattr(self.whisper_backend, "status", None)
@@ -395,6 +459,7 @@ class AudioTranscriber:
         self._whisper_phrase_text = ""
         self._whisper_phrase_language = None
         self._vad_continuation = False
+        self._whisper_energy_continuation = False
 
     def close(self) -> None:
         with self._close_lock:

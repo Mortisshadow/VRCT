@@ -8,6 +8,7 @@
 #include <iostream>
 #include <cmath>
 #include <string>
+#include <tuple>
 #include <vector>
 #ifdef _WIN32
 #include <fcntl.h>
@@ -17,6 +18,10 @@
 namespace {
 constexpr uint32_t MAGIC = 0x54524356u; // "VCRT" little-endian
 constexpr uint32_t VERSION = 1;
+constexpr uint32_t SAMPLE_RATE = 16000u;
+constexpr uint32_t PRE_PAD_SAMPLES = SAMPLE_RATE * 300u / 1000u;
+constexpr uint32_t POST_PAD_SAMPLES = SAMPLE_RATE * 500u / 1000u;
+constexpr uint32_t QUALITY_RETRY_MAX_SAMPLES = SAMPLE_RATE * 5u;
 template <typename T> bool read_one(T &v) { return static_cast<bool>(std::cin.read(reinterpret_cast<char *>(&v), sizeof(v))); }
 bool read_bytes(std::string &s, uint32_t n) {
     s.resize(n);
@@ -129,6 +134,17 @@ int main(int argc, char **argv) {
             response(0, 0, 0, language, "", "");
             continue;
         }
+        // Short phrases are less reliable when speech touches either edge of
+        // the input. Add digital silence without changing VRCT's retained
+        // audio or writing a temporary WAV. The persistent vector reuses its
+        // capacity after the first request, avoiding repeated GPU/model setup.
+        pcm.resize(samples + PRE_PAD_SAMPLES + POST_PAD_SAMPLES);
+        std::move_backward(
+            pcm.begin(), pcm.begin() + samples,
+            pcm.begin() + PRE_PAD_SAMPLES + samples
+        );
+        std::fill(pcm.begin(), pcm.begin() + PRE_PAD_SAMPLES, 0.0f);
+        std::fill(pcm.begin() + PRE_PAD_SAMPLES + samples, pcm.end(), 0.0f);
         auto started = std::chrono::steady_clock::now();
         // Greedy decoding is whisper.cpp's normal low-latency path. Beam search
         // multiplies Vulkan decoder work and has triggered driver crashes on
@@ -146,18 +162,49 @@ int main(int argc, char **argv) {
         // input; whisper.cpp's streaming example disables this fallback too.
         params.temperature_inc = -1.0f;
         params.single_segment = false; params.print_progress = false; params.print_realtime = false; params.print_timestamps = false;
-        int rc = whisper_full(ctx, params, pcm.data(), static_cast<int>(pcm.size()));
+        auto decode = [&]() {
+            std::string text;
+            float confidence = 0.0f;
+            int confidence_count = 0;
+            const int rc = whisper_full(ctx, params, pcm.data(), static_cast<int>(pcm.size()));
+            if (rc != 0) return std::make_tuple(rc, text, confidence, 0);
+            const int n = whisper_full_n_segments(ctx);
+            for (int i = 0; i < n; ++i) {
+                text += whisper_full_get_segment_text(ctx, i);
+                const int nt = whisper_full_n_tokens(ctx, i);
+                for (int t = 0; t < nt; ++t) {
+                    confidence += whisper_full_get_token_p(ctx, i, t);
+                    ++confidence_count;
+                }
+            }
+            if (confidence_count > 0) confidence /= confidence_count;
+            return std::make_tuple(rc, text, confidence, n);
+        };
+        auto [rc, text, confidence, n] = decode();
+        bool quality_retry = false;
+        const bool blank_text = text.find_first_not_of(" \t\r\n") == std::string::npos;
+        if (rc == 0 && blank_text && samples <= QUALITY_RETRY_MAX_SAMPLES) {
+            // One bounded rescue pass for short speech which the fast strict
+            // pass classified as no-speech. It never loops and reuses the same
+            // resident model/context, so model load and latency stay bounded.
+            quality_retry = true;
+            params.temperature = 0.2f;
+            params.logprob_thold = std::min(avg_logprob, -1.0f);
+            params.no_speech_thold = std::max(no_speech, 0.8f);
+            auto [retry_rc, retry_text, retry_confidence, retry_segments] = decode();
+            if (retry_rc == 0) {
+                text = std::move(retry_text);
+                confidence = retry_confidence;
+                n = retry_segments;
+            } else {
+                std::cerr << "quality retry failed rc=" << retry_rc << "; keeping initial result\n";
+            }
+        }
         double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
         if (rc != 0) { response(-4, 0, elapsed, "", "", "whisper inference failed"); continue; }
-        std::string text; float confidence = 0.0f; int confidence_count = 0; int n = whisper_full_n_segments(ctx);
-        for (int i = 0; i < n; ++i) {
-            text += whisper_full_get_segment_text(ctx, i);
-            const int nt = whisper_full_n_tokens(ctx, i);
-            for (int t = 0; t < nt; ++t) { confidence += whisper_full_get_token_p(ctx, i, t); ++confidence_count; }
-        }
-        if (confidence_count > 0) confidence /= confidence_count;
         const char *detected = whisper_lang_str(whisper_full_lang_id(ctx));
-        std::cerr << "transcription_ms=" << elapsed << " segments=" << n << "\n";
+        std::cerr << "transcription_ms=" << elapsed << " segments=" << n
+                  << " quality_retry=" << quality_retry << " input_samples=" << samples << "\n";
         response(0, confidence, elapsed, detected ? detected : "", text, "");
     }
     whisper_free(ctx); return 0;

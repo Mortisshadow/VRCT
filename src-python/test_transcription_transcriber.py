@@ -94,14 +94,14 @@ class TestWhisperAudioConversion(unittest.TestCase):
                                        whisper_backend=WHISPER_CPP_VULKAN_BACKEND,
                                        backend_factory=lambda: Backend())
         now = datetime.now()
-        first = np.ones(6000, dtype="<i2").tobytes()
-        second = np.ones(6000, dtype="<i2").tobytes()
+        first = np.ones(48000, dtype="<i2").tobytes()
+        second = np.ones(48000, dtype="<i2").tobytes()
         q = Queue(); q.put((first, now))
         transcriber.transcribeAudioQueue(q, ["English"], ["United States"])
-        q.put((second, now + timedelta(seconds=1)))
+        q.put((second, now + timedelta(seconds=3)))
         transcriber.transcribeAudioQueue(q, ["English"], ["United States"])
 
-        self.assertEqual(seen_lengths, [6000, 10000])  # 6000 new + 4000 (250 ms) overlap
+        self.assertEqual(seen_lengths, [48000, 52000])  # 48000 new + 4000 (250 ms) overlap
         shared = transcriber.whisper_backend
         from models.transcription.transcription_backend import releaseBackend
         releaseBackend(shared); _registry.clear()
@@ -123,10 +123,10 @@ class TestWhisperAudioConversion(unittest.TestCase):
                                        whisper_backend=WHISPER_CPP_VULKAN_BACKEND,
                                        backend_factory=lambda: Backend())
         now = datetime.now()
-        q = Queue(); q.put((np.ones(6000, dtype="<i2").tobytes(), now))
+        q = Queue(); q.put((np.ones(48000, dtype="<i2").tobytes(), now))
         transcriber.transcribeAudioQueue(q, ["English", "Japanese"], ["United States", "Japan"])
         self.assertEqual(transcriber.getTranscript()["text"], "hello world")
-        q.put((np.ones(6000, dtype="<i2").tobytes(), now + timedelta(seconds=1)))
+        q.put((np.ones(48000, dtype="<i2").tobytes(), now + timedelta(seconds=3)))
         transcriber.transcribeAudioQueue(q, ["English", "Japanese"], ["United States", "Japan"])
 
         self.assertEqual(transcriber.getTranscript()["text"], "hello world again")
@@ -134,6 +134,65 @@ class TestWhisperAudioConversion(unittest.TestCase):
         shared = transcriber.whisper_backend
         from models.transcription.transcription_backend import releaseBackend
         releaseBackend(shared); _registry.clear()
+
+    @patch("models.transcription.transcription_transcriber.checkWhisperCppWeight", return_value=True)
+    def test_short_reply_after_completed_energy_phrase_starts_new_phrase(self, _):
+        results = iter((
+            BackendResult("好きな食べ物はご飯ですか", "ja", .9),
+            BackendResult("はい、ご飯です", "ja", .9),
+        ))
+        class Backend:
+            def transcribe(self, audio, **kwargs): return next(results)
+            def close(self): pass
+        transcriber = AudioTranscriber(
+            True, FakeAudioSource(), 3, 10, "Whisper", root=".", whisper_weight_type="m",
+            whisper_backend=WHISPER_CPP_VULKAN_BACKEND, backend_factory=lambda: Backend(),
+        )
+        now = datetime.now()
+        q = Queue(); q.put((np.ones(16000, dtype="<i2").tobytes(), now))
+        transcriber.transcribeAudioQueue(q, ["Japanese"], ["Japan"])
+        self.assertEqual(transcriber.getTranscript()["text"], "好きな食べ物はご飯ですか")
+        q.put((np.ones(8000, dtype="<i2").tobytes(), now + timedelta(seconds=1)))
+        transcriber.transcribeAudioQueue(q, ["Japanese"], ["Japan"])
+
+        self.assertEqual(transcriber.getTranscript()["text"], "はい、ご飯です")
+        transcriber.close(); _registry.clear()
+
+    @patch("models.transcription.transcription_transcriber.checkWhisperCppWeight", return_value=True)
+    def test_zero_confidence_text_is_not_lost_to_empty_sentinel(self, _):
+        class Backend:
+            def transcribe(self, audio, **kwargs):
+                return BackendResult("短い返事", "ja", 0.0)
+            def close(self): pass
+        transcriber = AudioTranscriber(
+            False, FakeAudioSource(), 3, 10, "Whisper", root=".", whisper_weight_type="m",
+            whisper_backend=WHISPER_CPP_VULKAN_BACKEND, backend_factory=lambda: Backend(),
+        )
+        q = Queue(); q.put((np.ones(8000, dtype="<i2").tobytes(), datetime.now()))
+        transcriber.transcribeAudioQueue(q, ["Japanese"], ["Japan"])
+
+        self.assertEqual(transcriber.getTranscript()["text"], "短い返事")
+        transcriber.close(); _registry.clear()
+
+    @patch("models.transcription.transcription_transcriber.checkWhisperCppWeight", return_value=True)
+    def test_drained_continuous_chunks_keep_all_new_audio(self, _):
+        lengths = []
+        class Backend:
+            def transcribe(self, audio, **kwargs):
+                lengths.append(len(audio)); return BackendResult("ok", "en", .9)
+            def close(self): pass
+        transcriber = AudioTranscriber(
+            False, FakeAudioSource(), 3, 10, "Whisper", root=".", whisper_weight_type="m",
+            whisper_backend=WHISPER_CPP_VULKAN_BACKEND, backend_factory=lambda: Backend(),
+        )
+        now = datetime.now()
+        q = Queue()
+        q.put((np.ones(48000, dtype="<i2").tobytes(), now))
+        q.put((np.ones(48000, dtype="<i2").tobytes(), now + timedelta(seconds=3)))
+        transcriber.transcribeAudioQueue(q, ["English"], ["United States"])
+
+        self.assertEqual(lengths, [96000])
+        transcriber.close(); _registry.clear()
 
     @patch("models.transcription.transcription_transcriber.checkWhisperCppWeight", return_value=True)
     def test_new_phrase_resets_overlap_text_and_detected_language(self, _):
